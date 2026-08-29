@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -53,6 +54,26 @@ def bin_path(*parts: str) -> str:
     cwd_fallback = os.path.join(os.getcwd(), "bin", *parts)
     exe_fallback = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "bin", *parts)
     return first_existing_path(primary, workspace_fallback, cwd_fallback, exe_fallback)
+
+
+def ffmpeg_binary_path() -> str:
+    """Resolve FFmpeg on both the Windows bundle and Linux/Colab."""
+    configured = str(os.getenv("CAPCAP_FFMPEG_PATH", "") or "").strip()
+    if configured and os.path.isfile(configured):
+        return configured
+    if os.name != "nt":
+        return shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
+    return bin_path("ffmpeg", "ffmpeg.exe")
+
+
+def ffprobe_binary_path() -> str:
+    """Resolve ffprobe beside the bundle or from the Linux PATH."""
+    configured = str(os.getenv("CAPCAP_FFPROBE_PATH", "") or "").strip()
+    if configured and os.path.isfile(configured):
+        return configured
+    if os.name != "nt":
+        return shutil.which("ffprobe") or "/usr/bin/ffprobe"
+    return bin_path("ffmpeg", "ffprobe.exe")
 
 
 def models_path(*parts: str) -> str:

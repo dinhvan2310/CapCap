@@ -5,7 +5,7 @@ import re
 import subprocess
 import time
 
-from runtime_paths import bin_path, models_path, subprocess_hidden_kwargs, subprocess_text_kwargs
+from runtime_paths import bin_path, ffmpeg_binary_path, models_path, subprocess_hidden_kwargs, subprocess_text_kwargs
 from runtime_profile import is_remote_profile
 from services import ChunkingService, EngineRuntime, ProjectService, SegmentRegroupService, SegmentService
 from services.resource_download_service import ResourceDownloadService
@@ -403,7 +403,7 @@ class PrepareWorkflow:
 
             audio_output_path = self.project_service.build_path(project_state, "source", "extracted_audio.wav")
             os.makedirs(os.path.dirname(audio_output_path), exist_ok=True)
-            ffmpeg_bin = os.path.join(bin_path(), "ffmpeg", "ffmpeg.exe")
+            ffmpeg_bin = ffmpeg_binary_path()
             subprocess.run(
                 [ffmpeg_bin, "-y", "-i", video_path, "-vn", "-acodec", "pcm_s16le",
                  "-ar", "16000", "-ac", "1", audio_output_path],

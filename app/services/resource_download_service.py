@@ -12,7 +12,7 @@ import zipfile
 import tarfile
 from pathlib import Path
 
-from runtime_paths import app_path, bin_path, bundle_root, join_root, models_path, subprocess_hidden_kwargs, subprocess_text_kwargs
+from runtime_paths import app_path, bin_path, bundle_root, ffmpeg_binary_path, join_root, models_path, subprocess_hidden_kwargs, subprocess_text_kwargs
 
 
 class ResourceDownloadService:
@@ -561,7 +561,7 @@ class ResourceDownloadService:
     def validate_pipeline_runtime(self) -> list[tuple[str, str]]:
         """Check local executables and writable working folders before a worker starts."""
         issues: list[tuple[str, str]] = []
-        ffmpeg_path = bin_path("ffmpeg", "ffmpeg.exe")
+        ffmpeg_path = ffmpeg_binary_path()
         if not os.path.isfile(ffmpeg_path):
             issues.append(("ffmpeg", f"FFmpeg is missing: {ffmpeg_path}"))
         else:

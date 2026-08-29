@@ -7,7 +7,7 @@ import threading
 from functools import lru_cache
 
 from new_highlight_selector import auto_select_matches
-from runtime_paths import asset_path, bin_path, temp_path
+from runtime_paths import asset_path, bin_path, ffmpeg_binary_path, ffprobe_binary_path, temp_path
 from video_filter_chain import (
     build_video_color_chain,
     build_video_filter_chain,
@@ -23,11 +23,11 @@ from video_filter_chain import (
 def _ffmpeg_path(override=None):
     if override:
         return override
-    return bin_path("ffmpeg", "ffmpeg.exe")
+    return ffmpeg_binary_path()
 
 
 def _ffprobe_path():
-    return bin_path("ffmpeg", "ffprobe.exe")
+    return ffprobe_binary_path()
 
 
 def _subprocess_run_kwargs() -> dict:

@@ -48,6 +48,7 @@ function App() {
   const [logs, setLogs] = useState<string[]>([]);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [sourceUrl, setSourceUrl] = useState("");
+  const [previewError, setPreviewError] = useState("");
   const [segments, setSegments] = useState<Segment[]>([]);
   const [revision, setRevision] = useState(0);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -74,11 +75,16 @@ function App() {
 
   useEffect(() => {
     let objectUrl = "";
-    if (!project || !token) { setSourceUrl(""); return; }
+    if (!project || !token) { setSourceUrl(""); setPreviewError(""); return; }
+    setPreviewError("");
     void fetch(`/api/projects/${project.project_id}/source`, { headers: { Authorization: `Bearer ${token}` } })
-      .then((response) => response.ok ? response.blob() : Promise.reject(new Error("Preview unavailable")))
+      .then(async (response) => {
+        if (response.ok) return response.blob();
+        const detail = await response.json().catch(() => ({})) as { detail?: string };
+        throw new Error(detail.detail ?? `Preview request failed (${response.status})`);
+      })
       .then((blob) => { objectUrl = URL.createObjectURL(blob); setSourceUrl(objectUrl); })
-      .catch(() => setSourceUrl(""));
+      .catch((error: unknown) => { setSourceUrl(""); setPreviewError(error instanceof Error ? error.message : "Preview request failed"); });
     return () => { if (objectUrl) URL.revokeObjectURL(objectUrl); };
   }, [project, token]);
 
@@ -203,7 +209,7 @@ function App() {
       {connected && <>
         <section className="toolbar panel"><div><span className="eyebrow">WORKSPACE</span><h2>{project?.filename ?? "Chưa có video"}</h2><p>{String(session?.model ?? "model chưa xác định")} · one user / one active job</p></div><div className="actions"><input ref={fileInput} type="file" accept="video/*,.mkv,.webm,.mov,.mp4" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); }} /><button disabled={busy} onClick={() => fileInput.current?.click()}>Upload video</button>{project && <><select value={phase} onChange={(event) => setPhase(event.target.value)} disabled={busy}><option value="prepare">Prepare</option><option value="voice">Voice</option><option value="export">Export</option></select><button disabled={busy} onClick={() => void run(phase)}>Run phase</button><button className="primary" disabled={busy} onClick={() => void run("run_all")}>Run all</button>{job && ["queued", "running", "cancelling"].includes(job.status) && <button className="danger" onClick={() => void cancel()}>Cancel</button>}{job && ["failed", "cancelled"].includes(job.status) && <><button disabled={busy} onClick={() => void retry()}>Retry</button><button disabled={busy} onClick={() => void rebuild()}>Rebuild phase</button></>}</>}</div></section>
         {uploadProgress > 0 && uploadProgress < 100 && <div className="progress-track"><span style={{ width: `${uploadProgress}%` }} /></div>}
-        <section className="editor-grid"><div className="preview panel"><div className="panel-heading"><span>Preview</span><span className="muted">Browser playback</span></div>{sourceUrl ? <video className="source-video" src={sourceUrl} controls playsInline /> : <div className="preview-empty">{project ? "Preview unavailable: browser không hỗ trợ codec/container này." : "Upload video để bắt đầu."}</div>}</div><div className="inspector panel"><div className="panel-heading"><span>Project</span><span className="muted">Revision {revision}</span></div>{project ? <><div className="stat"><span>Fingerprint</span><code>{project.fingerprint.slice(0, 20)}…</code></div><div className="stat"><span>Resume</span><strong>{project.resumed ? "Matched" : "New"}</strong></div><div className="stat"><span>Rebuild</span><strong>{project.requires_rebuild ? "Required" : "No"}</strong></div><button onClick={() => void saveSegments()} disabled={busy || !segments.length}>Save subtitle edits</button><button onClick={() => void saveExportToDrive()} disabled={busy}>Save export to Drive</button><button onClick={() => void cleanup()} disabled={busy}>Dọn artifact trung gian</button><textarea aria-label="Project notes" placeholder="Subtitle/editor state sẽ được nối ở phase editor." /></> : <p className="muted">Project state sẽ xuất hiện ở đây.</p>}</div></section>
+        <section className="editor-grid"><div className="preview panel"><div className="panel-heading"><span>Preview</span><span className="muted">Browser playback</span></div>{sourceUrl ? <video className="source-video" src={sourceUrl} controls playsInline onError={() => setPreviewError("Browser không hỗ trợ codec/container của video này.")} /> : <div className="preview-empty">{project ? (previewError || "Đang tải preview…") : "Upload video để bắt đầu."}</div>}</div><div className="inspector panel"><div className="panel-heading"><span>Project</span><span className="muted">Revision {revision}</span></div>{project ? <><div className="stat"><span>Fingerprint</span><code>{project.fingerprint.slice(0, 20)}…</code></div><div className="stat"><span>Resume</span><strong>{project.resumed ? "Matched" : "New"}</strong></div><div className="stat"><span>Rebuild</span><strong>{project.requires_rebuild ? "Required" : "No"}</strong></div><button onClick={() => void saveSegments()} disabled={busy || !segments.length}>Save subtitle edits</button><button onClick={() => void saveExportToDrive()} disabled={busy}>Save export to Drive</button><button onClick={() => void cleanup()} disabled={busy}>Dọn artifact trung gian</button><textarea aria-label="Project notes" placeholder="Subtitle/editor state sẽ được nối ở phase editor." /></> : <p className="muted">Project state sẽ xuất hiện ở đây.</p>}</div></section>
         <section className="bottom-grid"><div className="timeline panel"><div className="panel-heading"><span>Timeline</span><span className="muted">Frame-accurate editor · {segments.length} segments</span></div><div className="timeline-ruler"><span>00:00</span><span>00:30</span><span>01:00</span><span>01:30</span></div><div className="track"><span className="track-label">SUBTITLE</span><div className="clip">{segments.length ? `${segments.length} translated cues` : "Translated subtitle"}</div></div><div className="track"><span className="track-label">AUDIO</span><div className="clip muted-clip">Original / TTS</div></div>{segments.length > 0 && <div className="segment-list">{segments.slice(0, 8).map((segment, index) => <label key={`${index}-${segment.start}`}><span>{index + 1} · {segment.start.toFixed(2)}–{segment.end.toFixed(2)}</span><input value={segment.text} onChange={(event) => setSegments((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, text: event.target.value } : item))} /></label>)}</div>}</div><div className="logs panel"><div className="panel-heading"><span>Activity</span><span className="muted">{job?.progress ?? 0}%</span></div><div className="log-list">{logs.length ? logs.map((line, index) => <div key={`${line}-${index}`}>{line}</div>) : <span className="muted">{message || "Sẵn sàng."}</span>}</div></div></section>
       </>}
     </main>
