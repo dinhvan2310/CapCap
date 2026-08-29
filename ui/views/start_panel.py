@@ -6,7 +6,6 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
-    QDoubleSpinBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -19,11 +18,11 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QStackedWidget,
-    QSpinBox,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
+from widgets.spin_boxes import ReliableDoubleSpinBox, ReliableSpinBox
 
 
 def _section_title(text):
@@ -412,7 +411,7 @@ def build_start_group(gui, left_layout):
     gui.audio_handling_combo.addItem("Cleaner voice (remove original voice)", "clean")
     gui.audio_handling_combo.setCurrentIndex(0)
     audio_cleanup_layout.addWidget(gui.audio_handling_combo)
-    gui.audio_handling_hint_label = QLabel("Fast keeps original audio with voice. Cleaner removes original voice, keeping only background music.", gui)
+    gui.audio_handling_hint_label = QLabel("Fast transcribes the full source mix. Cleaner separates vocals for transcription; choose Music Layer separately for the final mix.", gui)
     gui.audio_handling_hint_label.setObjectName("helperLabel")
     gui.audio_handling_hint_label.setWordWrap(True)
     audio_cleanup_layout.addWidget(gui.audio_handling_hint_label)
@@ -674,17 +673,17 @@ def build_start_group(gui, left_layout):
     gui.subtitle_align_combo.addItems(["Bottom", "Bottom Left", "Bottom Right", "Center", "Top"])
     gui.subtitle_align_combo.setCurrentText("Bottom")
     gui.subtitle_custom_x_label = QLabel("Custom X:")
-    gui.subtitle_custom_x_spin = QSpinBox()
+    gui.subtitle_custom_x_spin = ReliableSpinBox()
     gui.subtitle_custom_x_spin.setRange(0, 100)
     gui.subtitle_custom_x_spin.setValue(50)
     gui.subtitle_custom_x_spin.setSuffix(" %")
     gui.subtitle_custom_y_label = QLabel("Custom Y:")
-    gui.subtitle_custom_y_spin = QSpinBox()
+    gui.subtitle_custom_y_spin = ReliableSpinBox()
     gui.subtitle_custom_y_spin.setRange(0, 100)
     gui.subtitle_custom_y_spin.setValue(86)
     gui.subtitle_custom_y_spin.setSuffix(" %")
     gui.subtitle_bottom_offset_label = QLabel("Vertical Offset:")
-    gui.subtitle_bottom_offset_spin = QSpinBox()
+    gui.subtitle_bottom_offset_spin = ReliableSpinBox()
     gui.subtitle_bottom_offset_spin.setRange(0, 300)
     gui.subtitle_bottom_offset_spin.setValue(30)
     gui.subtitle_bottom_offset_spin.setSuffix(" px")
@@ -741,7 +740,7 @@ def build_start_group(gui, left_layout):
     gui.subtitle_font_combo.setEditable(True)
     gui.subtitle_font_combo.addItems(["Montserrat", "Roboto", "Inter", "Poppins", "Arial", "Segoe UI", "Tahoma", "Verdana", "Times New Roman"])
     gui.subtitle_font_combo.setCurrentText("Segoe UI")
-    gui.subtitle_font_size_spin = QSpinBox()
+    gui.subtitle_font_size_spin = ReliableSpinBox()
     # Retained as the canonical source-video size for projects/export. The
     # percentage picker below is the user-facing control.
     gui.subtitle_font_size_spin.setRange(30, 90)
@@ -774,14 +773,14 @@ def build_start_group(gui, left_layout):
     )
     gui.subtitle_animation_combo.setCurrentText("Pop In")
     gui.subtitle_animation_combo.currentTextChanged.connect(lambda _value: gui.on_subtitle_animation_changed())
-    gui.subtitle_animation_time_spin = QDoubleSpinBox()
+    gui.subtitle_animation_time_spin = ReliableDoubleSpinBox()
     gui.subtitle_animation_time_spin.setRange(0.1, 2.5)
     gui.subtitle_animation_time_spin.setSingleStep(0.05)
     gui.subtitle_animation_time_spin.setDecimals(2)
     gui.subtitle_animation_time_spin.setValue(0.22)
     gui.subtitle_animation_time_spin.setSuffix(" s")
     gui.subtitle_animation_time_label = QLabel("Duration")
-    gui.subtitle_bg_alpha_spin = QDoubleSpinBox()
+    gui.subtitle_bg_alpha_spin = ReliableDoubleSpinBox()
     gui.subtitle_bg_alpha_spin.setRange(0.0, 1.0)
     gui.subtitle_bg_alpha_spin.setSingleStep(0.05)
     gui.subtitle_bg_alpha_spin.setDecimals(2)
@@ -814,7 +813,7 @@ def build_start_group(gui, left_layout):
     single_line_grid = QGridLayout(single_line_wrapper)
     single_line_grid.setContentsMargins(12, 12, 12, 12)
     gui.subtitle_single_line_cb.setText("Enable Netflix-style single-line subtitles")
-    gui.subtitle_words_per_segment_spin = QSpinBox()
+    gui.subtitle_words_per_segment_spin = ReliableSpinBox()
     gui.subtitle_words_per_segment_spin.setRange(1, 20)
     gui.subtitle_words_per_segment_spin.setValue(4)
     gui.subtitle_words_per_segment_spin.setSuffix(" words")
@@ -856,13 +855,13 @@ def build_start_group(gui, left_layout):
     gui.subtitle_background_shape_combo.setVisible(False)
     background_wrapper_layout.addWidget(gui.subtitle_background_shape_label, 3, 0)
     background_wrapper_layout.addWidget(gui.subtitle_background_shape_combo, 3, 1)
-    gui.subtitle_background_padding_spin = QSpinBox()
+    gui.subtitle_background_padding_spin = ReliableSpinBox()
     gui.subtitle_background_padding_spin.setRange(0, 30)
     gui.subtitle_background_padding_spin.setValue(6)
     gui.subtitle_background_padding_spin.setSuffix(" px")
     background_wrapper_layout.addWidget(QLabel("Padding:"), 4, 0)
     background_wrapper_layout.addWidget(gui.subtitle_background_padding_spin, 4, 1)
-    gui.subtitle_background_radius_spin = QSpinBox()
+    gui.subtitle_background_radius_spin = ReliableSpinBox()
     gui.subtitle_background_radius_spin.setRange(0, 80)
     gui.subtitle_background_radius_spin.setValue(0)
     gui.subtitle_background_radius_spin.setSuffix(" px")
@@ -896,7 +895,7 @@ def build_start_group(gui, left_layout):
     gui.subtitle_preset_summary_label.setTextInteractionFlags(Qt.NoTextInteraction)
     subtitle_layout.addWidget(gui.subtitle_preset_summary_label)
 
-    gui.subtitle_x_offset_spin = QSpinBox()
+    gui.subtitle_x_offset_spin = ReliableSpinBox()
     gui.subtitle_x_offset_spin.setRange(-400, 400)
     gui.subtitle_x_offset_spin.setValue(0)
     gui.subtitle_x_offset_spin.hide()
@@ -910,7 +909,7 @@ def build_start_group(gui, left_layout):
 
     audio_mix_card, audio_mix_layout = _build_collapsible_section("Audio Mix", start_expanded=True)
     audio_mix_inner_card, audio_mix_inner_layout = _section_card()
-    audio_mix_title = QLabel("Mix Style")
+    audio_mix_title = QLabel("Quick Mix Preset")
     audio_mix_title.setObjectName("sectionTitle")
     audio_mix_inner_layout.addWidget(audio_mix_title)
     gui.audio_mix_preset_combo = QComboBox()
@@ -922,7 +921,7 @@ def build_start_group(gui, left_layout):
     gui.audio_mix_preset_combo.addItem("Custom", "custom")
     gui.audio_mix_preset_combo.setCurrentIndex(2)
     audio_mix_inner_layout.addWidget(gui.audio_mix_preset_combo)
-    gui.audio_mix_preset_hint_label = QLabel("Presets set both track volumes. Manual adjustment switches to Custom.", gui)
+    gui.audio_mix_preset_hint_label = QLabel("Optional shortcut for Original/TTS. Track Volumes below remain authoritative; Music is independent.", gui)
     gui.audio_mix_preset_hint_label.setObjectName("helperLabel")
     gui.audio_mix_preset_hint_label.setWordWrap(True)
     audio_mix_inner_layout.addWidget(gui.audio_mix_preset_hint_label)
@@ -968,6 +967,31 @@ def build_start_group(gui, left_layout):
     gui.audio_a2_volume_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
     a2_row.addWidget(gui.audio_a2_volume_label)
     audio_tracks_layout.addLayout(a2_row)
+
+    # Keep the optional Music volume control as one collapsible row.  A2
+    # Music is only meaningful after a Music Layer has been added, so the
+    # row starts hidden and is shown by the timeline-state synchronizer.
+    gui.audio_music_volume_row = QWidget(gui)
+    music_row = QHBoxLayout(gui.audio_music_volume_row)
+    music_row.setContentsMargins(0, 0, 0, 0)
+    music_row.setSpacing(6)
+    music_label = QLabel("A2 Music")
+    music_label.setMinimumWidth(100)
+    music_row.addWidget(music_label)
+    gui.audio_music_volume_slider = QSlider(Qt.Horizontal)
+    gui.audio_music_volume_slider.setMinimum(0)
+    gui.audio_music_volume_slider.setMaximum(200)
+    gui.audio_music_volume_slider.setValue(30)
+    gui.audio_music_volume_slider.setTickInterval(50)
+    gui.audio_music_volume_slider.setTickPosition(QSlider.TicksBelow)
+    music_row.addWidget(gui.audio_music_volume_slider, 1)
+    gui.audio_music_volume_label = QLabel("30%")
+    gui.audio_music_volume_label.setObjectName("helperLabel")
+    gui.audio_music_volume_label.setMinimumWidth(40)
+    gui.audio_music_volume_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    music_row.addWidget(gui.audio_music_volume_label)
+    gui.audio_music_volume_row.setVisible(False)
+    audio_tracks_layout.addWidget(gui.audio_music_volume_row)
 
     audio_mix_layout.addWidget(audio_tracks_card)
     audio_page.layout().addWidget(audio_mix_card)

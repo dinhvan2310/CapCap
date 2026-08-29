@@ -582,3 +582,94 @@ def mix_original_with_dub(
     mixed.export(output_wav_path, format="wav")
     return output_wav_path
 
+
+def mix_audio_tracks(
+    *,
+    tracks: list[dict],
+    output_wav_path: str,
+    total_duration_ms: int | None = None,
+    sample_rate: int = 16000,
+) -> str:
+    """Mix timeline audio tracks into one PCM WAV.
+
+    Each track dictionary accepts ``path``, ``volume`` (percentage),
+    ``muted``, ``start``/``end`` (seconds), ``source_start`` (seconds), and
+    ``loop``.  This is deliberately a small, deterministic compositor used
+    by both preview and export so the track-volume controls have one meaning.
+    A track with volume <= 0 or muted=True is skipped without opening its
+    source file.  ``loop`` is useful for music beds that are shorter than the
+    video; voice/original tracks should leave it false.
+    """
+    _require_pydub()
+    from pydub import AudioSegment
+
+    normalized_tracks = []
+    max_end_ms = max(0, int(total_duration_ms or 0))
+    for raw in list(tracks or []):
+        if not isinstance(raw, dict):
+            continue
+        path = str(raw.get("path", "") or "").strip()
+        if not path or not os.path.exists(path):
+            continue
+        if bool(raw.get("muted", False)):
+            continue
+        try:
+            volume = max(0.0, min(200.0, float(raw.get("volume", 100.0))))
+        except (TypeError, ValueError):
+            volume = 100.0
+        if volume <= 0.0:
+            continue
+        try:
+            start_ms = max(0, int(float(raw.get("start", 0.0) or 0.0) * 1000.0))
+        except (TypeError, ValueError):
+            start_ms = 0
+        try:
+            end_ms = max(0, int(float(raw.get("end", 0.0) or 0.0) * 1000.0))
+        except (TypeError, ValueError):
+            end_ms = 0
+        try:
+            source_start_ms = max(0, int(float(raw.get("source_start", 0.0) or 0.0) * 1000.0))
+        except (TypeError, ValueError):
+            source_start_ms = 0
+        normalized_tracks.append((raw, path, volume, start_ms, end_ms, source_start_ms))
+
+    if not normalized_tracks:
+        raise ValueError("No active audio tracks to mix.")
+
+    rendered = []
+    for raw, path, volume, start_ms, end_ms, source_start_ms in normalized_tracks:
+        audio = AudioSegment.from_file(path).set_frame_rate(sample_rate).set_channels(1)
+        if source_start_ms:
+            audio = audio[source_start_ms:]
+        if len(audio) <= 0:
+            continue
+
+        requested_len = max(0, end_ms - start_ms) if end_ms > start_ms else 0
+        if bool(raw.get("loop", False)) and requested_len > 0 and len(audio) < requested_len:
+            repeats = (requested_len + len(audio) - 1) // len(audio)
+            audio = audio * max(1, repeats)
+        if requested_len > 0:
+            audio = audio[:requested_len]
+        if volume != 100.0:
+            # Keep 0% as a skip above; pydub gain is logarithmic and matches
+            # the existing A1/TS1 percentage conversion used by the UI.
+            import math
+            gain_db = 20.0 * math.log10(volume / 100.0)
+            audio = audio + gain_db
+        if len(audio) <= 0:
+            continue
+        render_end = start_ms + len(audio)
+        max_end_ms = max(max_end_ms, render_end, end_ms)
+        rendered.append((start_ms, audio))
+
+    if not rendered or max_end_ms <= 0:
+        raise ValueError("Active audio tracks contain no audio.")
+
+    base = AudioSegment.silent(duration=max_end_ms, frame_rate=sample_rate).set_channels(1)
+    for start_ms, audio in rendered:
+        base = base.overlay(audio, position=max(0, start_ms))
+
+    os.makedirs(os.path.dirname(output_wav_path) or ".", exist_ok=True)
+    base.export(output_wav_path, format="wav")
+    return output_wav_path
+

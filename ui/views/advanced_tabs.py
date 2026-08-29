@@ -102,8 +102,8 @@ def build_advanced_group(gui, left_layout):
     source_card = _build_audio_source_controls(gui)
     audio_layout = getattr(gui, "workflow_audio_layout", None)
     if audio_layout is not None:
-        # Place source selection before mix controls, where users naturally
-        # choose what audio they are going to edit.
+        # Place Music Layer controls before Track Volumes, where users can
+        # add the source before adjusting its independent level.
         audio_layout.insertWidget(0, source_card)
     else:
         group_layout.addWidget(source_card)
@@ -112,67 +112,21 @@ def build_advanced_group(gui, left_layout):
 
 
 def _build_audio_source_controls(gui):
-    source_card, source_layout = _advanced_block("Audio Source")
-    source_intro = gui.make_helper_label("Choose the audio used for preview and export.")
-    source_layout.addWidget(source_intro)
-
-    source_mode_row = QHBoxLayout()
-    source_mode_row.setSpacing(16)
-    gui.use_generated_audio_radio.setText("Generate voice")
-    gui.use_existing_audio_radio.setText("Use finished audio")
-    gui.use_generated_audio_radio.setToolTip("Create a voice track from the translated subtitles.")
-    gui.use_existing_audio_radio.setToolTip("Use an audio file you have already prepared.")
-    source_mode_row.addWidget(gui.use_generated_audio_radio)
-    source_mode_row.addWidget(gui.use_existing_audio_radio)
-    source_mode_row.addStretch(1)
-    source_layout.addLayout(source_mode_row)
-    source_layout.addWidget(gui.audio_source_hint_label)
-
-    gui.generated_audio_source_panel = QFrame()
-    gui.generated_audio_source_panel.setObjectName("audioSourcePanel")
-    generated_layout = QVBoxLayout(gui.generated_audio_source_panel)
-    generated_layout.setContentsMargins(10, 10, 10, 10)
-    generated_layout.setSpacing(6)
-    gui.generated_audio_section_label = QLabel("Voice generated from subtitles")
-    gui.generated_audio_section_label.setObjectName("audioSourceTitle")
-    generated_layout.addWidget(gui.generated_audio_section_label)
-    gui.generated_audio_section_hint = gui.make_helper_label(
-        "Optionally add background music or ambient audio to the generated voice."
+    # Audio is now composed from independent timeline tracks.  Keep the old
+    # hidden source widgets for project compatibility, but do not expose the
+    # radio-button/file-source workflow in the Audio tab.
+    source_card, source_layout = _advanced_block("Music Layer")
+    source_layout.addWidget(
+        gui.make_helper_label(
+            "Add music as its own timeline track. Its volume is controlled independently in Track Volumes."
+        )
     )
-    generated_layout.addWidget(gui.generated_audio_section_hint)
-    bg_label = QLabel("Background audio (optional)")
-    gui.bg_music_label = bg_label
-    generated_layout.addWidget(bg_label)
-    bg_row = QHBoxLayout()
-    bg_row.addWidget(gui.bg_music_edit, 1)
-    gui.browse_bg_music_btn = QPushButton("Choose file")
-    gui.browse_bg_music_btn.clicked.connect(gui.browse_background_audio)
-    bg_row.addWidget(gui.browse_bg_music_btn)
-    generated_layout.addLayout(bg_row)
-    source_layout.addWidget(gui.generated_audio_source_panel)
-
-    gui.existing_audio_source_panel = QFrame()
-    gui.existing_audio_source_panel.setObjectName("audioSourcePanel")
-    existing_layout = QVBoxLayout(gui.existing_audio_source_panel)
-    existing_layout.setContentsMargins(10, 10, 10, 10)
-    existing_layout.setSpacing(6)
-    gui.existing_audio_section_label = QLabel("Finished audio file")
-    gui.existing_audio_section_label.setObjectName("audioSourceTitle")
-    existing_layout.addWidget(gui.existing_audio_section_label)
-    gui.existing_audio_section_hint = gui.make_helper_label(
-        "Use a completed voice or mixed audio file instead of generating TTS."
-    )
-    existing_layout.addWidget(gui.existing_audio_section_hint)
-    existing_label = QLabel("Audio file")
-    gui.mixed_audio_label = existing_label
-    existing_layout.addWidget(existing_label)
-    existing_row = QHBoxLayout()
-    existing_row.addWidget(gui.mixed_audio_edit, 1)
-    gui.browse_mixed_audio_btn = QPushButton("Choose file")
-    gui.browse_mixed_audio_btn.clicked.connect(gui.browse_existing_mixed_audio)
-    existing_row.addWidget(gui.browse_mixed_audio_btn)
-    existing_layout.addLayout(existing_row)
-    source_layout.addWidget(gui.existing_audio_source_panel)
+    gui.add_music_layer_btn = QPushButton("Add Music Layer")
+    gui.add_music_layer_btn.setToolTip("Choose an audio file and add it as an independent music track.")
+    gui.add_music_layer_btn.clicked.connect(gui.add_music_layer)
+    source_layout.addWidget(gui.add_music_layer_btn)
+    gui.music_layers_summary_label = gui.make_helper_label("No music layer added.")
+    source_layout.addWidget(gui.music_layers_summary_label)
     return source_card
 
 def _build_hidden_runtime_widgets(gui):
@@ -191,8 +145,14 @@ def _build_hidden_runtime_widgets(gui):
 
     gui.bg_music_edit = QLineEdit(gui)
     gui.mixed_audio_edit = QLineEdit(gui)
-    gui.use_generated_audio_radio = QRadioButton("Use generated Vietnamese voice", gui)
-    gui.use_existing_audio_radio = QRadioButton("Use existing mixed audio", gui)
+    # These two controls are retained as non-visual compatibility state for
+    # projects/settings written by older releases.  Audio source selection is
+    # now represented by the A1/TS1/A2 timeline tracks, so the old labels must
+    # never be exposed in the active UI.
+    gui.use_generated_audio_radio = QRadioButton(gui)
+    gui.use_generated_audio_radio.setObjectName("legacyGeneratedAudioSource")
+    gui.use_existing_audio_radio = QRadioButton(gui)
+    gui.use_existing_audio_radio.setObjectName("legacyExistingAudioSource")
     gui.use_generated_audio_radio.setChecked(True)
     gui.audio_source_hint_label = gui.make_helper_label(
         "Preview and export will use the generated voice or voice+background mix by default."
@@ -227,6 +187,11 @@ def _build_hidden_runtime_widgets(gui):
         gui.vocal_sep_btn,
         gui.transcribe_btn,
         gui.translate_btn,
+        gui.bg_music_edit,
+        gui.mixed_audio_edit,
+        gui.use_generated_audio_radio,
+        gui.use_existing_audio_radio,
+        gui.audio_source_hint_label,
         gui.voice_output_folder_edit,
         gui.apply_translated_btn,
         gui.auto_preview_frame_cb,

@@ -222,9 +222,10 @@ class ProjectService:
             "voice_name": str(voice_name or "").strip(),
             "voice_speed": round(safe_voice_speed, 3),
             "timing_sync_mode": str(timing_sync_mode or "off").strip().lower(),
-            "background": self._file_signature(background_path),
-            "original_volume": int(original_volume or 50),
-            "dub_volume": int(dub_volume or 100),
+            # Voice generation produces the standalone TS1 track.  Original,
+            # Music, and per-track volume values belong to the later mix
+            # stage and must not invalidate/re-run TTS when only the mix is
+            # edited. Keep the parameters in the API for old callers.
             # The pronunciation dictionary changes generated audio without
             # changing the subtitle text.  Include its fingerprint so a
             # project edit invalidates the existing voice-track cache.

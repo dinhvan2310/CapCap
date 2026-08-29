@@ -225,6 +225,10 @@ def _connect_ui_signals(gui):
         gui.audio_a2_volume_slider.valueChanged.connect(
             gui.on_audio_a2_volume_changed
         )
+    if hasattr(gui, "audio_music_volume_slider"):
+        gui.audio_music_volume_slider.valueChanged.connect(
+            gui.on_audio_music_volume_changed
+        )
     if hasattr(gui, "audio_inspector_gain_spin"):
         gui.audio_inspector_gain_spin.valueChanged.connect(
             gui.on_audio_inspector_gain_changed

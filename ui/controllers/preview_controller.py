@@ -686,57 +686,98 @@ class PreviewController:
         return True
     
     def _regenerate_mixed_audio_with_current_volumes(self) -> str:
-        """Regenerate the mixed audio file using current volume settings from Audio tab.
-        
-        Returns the path to the newly generated mixed audio file, or empty string if failed.
+        """Render the active timeline audio tracks into one export sidecar.
+
+        A1 Original, TS1 TTS, and A2 Music are independent timeline tracks;
+        their track metadata (volume/mute/solo) is the source of truth.  The
+        resulting WAV replaces the source video's audio during export.
         """
-        if not hasattr(self.gui, 'last_voice_vi_path') or not self.gui.last_voice_vi_path:
-            print("[Export] No voice file path available")
-            return ""
-        
-        voice_path = self.gui.last_voice_vi_path
-        if not os.path.exists(voice_path):
-            print(f"[Export] Voice file not found at: {voice_path}")
-            return ""
-        
-        # Get current volume settings from Audio tab
-        original_volume = int(self.gui.audio_a1_volume_slider.value()) if hasattr(self.gui, 'audio_a1_volume_slider') else 50
-        dub_volume = int(self.gui.audio_a2_volume_slider.value()) if hasattr(self.gui, 'audio_a2_volume_slider') else 100
-        
-        # Get background audio path
-        bg_path = self.gui._resolve_preview_background_audio_path() if hasattr(self.gui, '_resolve_preview_background_audio_path') else ""
-        
-        if not bg_path or not os.path.exists(bg_path):
-            # No background, just use voice with dub volume
-            print(f"[Export] No background audio, using voice only: {voice_path}")
-            return voice_path
-        
-        # Generate new mixed audio with current volumes
+        # Resolve the standalone TTS artifact through the same project-aware
+        # path resolver used by preview.  This also restores voice audio when
+        # a project was reopened and only its persisted artifact is present.
+        voice_path = ""
         try:
-            from audio_mixer import mix_original_with_dub
-            
-            # Create output path in temp directory
-            temp_dir = os.path.join(self.gui.workspace_root, "temp")
-            os.makedirs(temp_dir, exist_ok=True)
-            output_path = os.path.join(temp_dir, "export_mixed_temp.wav")
-            
-            # Convert percentages to dB
-            original_gain_db = self.gui._percent_to_db(original_volume) if hasattr(self.gui, '_percent_to_db') else 0.0
-            dub_gain_db = self.gui._percent_to_db(dub_volume) if hasattr(self.gui, '_percent_to_db') else 0.0
-            
-            # Mix the audio
-            mix_original_with_dub(
-                original_wav_path=bg_path,
-                dub_wav_path=voice_path,
+            voice_path = str(self.gui._resolve_preview_voice_only_audio_path() or "")
+        except Exception:
+            voice_path = str(getattr(self.gui, "last_voice_vi_path", "") or "")
+
+        if voice_path and not os.path.exists(voice_path):
+            print(f"[Export] Voice file not found at: {voice_path}")
+            voice_path = ""
+
+        # A legacy "finished audio" source is still accepted for old project
+        # files, but the new UI creates independent timeline tracks instead.
+        if self.gui.using_existing_audio_source():
+            existing = self.gui.resolve_selected_audio_path()
+            if existing and os.path.exists(existing):
+                return existing
+
+        tracks = []
+        original_volume = float(self.gui._get_audio_track_volume("A1 Audio"))
+        original_muted = bool(self.gui._is_audio_track_muted("A1 Audio"))
+        original_path = self.gui._resolve_preview_original_audio_path()
+        if original_path and os.path.exists(original_path):
+            tracks.append({
+                "path": original_path,
+                "start": 0.0,
+                "end": self.gui._audio_total_duration_ms() / 1000.0,
+                "volume": original_volume,
+                "muted": original_muted,
+            })
+
+        tts_state = self.gui._tts_audio_track_state()
+        if voice_path:
+            tracks.append({
+                "path": voice_path,
+                "start": 0.0,
+                "end": self.gui._audio_total_duration_ms() / 1000.0,
+                "volume": float(tts_state.get("volume", 100.0)),
+                "muted": bool(tts_state.get("muted", False)),
+            })
+
+        tracks.extend(self.gui._music_audio_tracks())
+        active_tracks = [item for item in tracks if not item.get("muted") and float(item.get("volume", 0.0)) > 0.0]
+        if not active_tracks:
+            print("[Export] No active audio tracks selected.")
+            return ""
+
+        # Avoid a needless re-encode when a single source is already at unity
+        # gain. Otherwise generate one deterministic mixed WAV from all tracks.
+        if len(active_tracks) == 1:
+            item = active_tracks[0]
+            if abs(float(item.get("volume", 100.0)) - 100.0) < 0.001 and not item.get("loop"):
+                print(f"[Export] Single active audio track: {item.get('path')}")
+                return str(item.get("path", ""))
+
+        try:
+            from audio_mixer import mix_audio_tracks
+            temp_dir = self.gui.get_project_temp_dir("export")
+            signature = hashlib.sha1(
+                json.dumps(
+                    [
+                        {
+                            "path": os.path.abspath(str(item.get("path", ""))),
+                            "volume": round(float(item.get("volume", 100.0)), 3),
+                            "muted": bool(item.get("muted", False)),
+                            "start": round(float(item.get("start", 0.0)), 3),
+                            "end": round(float(item.get("end", 0.0)), 3),
+                        }
+                        for item in tracks
+                    ],
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()[:16]
+            output_path = os.path.join(temp_dir, f"export_audio_mix_{signature}.wav")
+            mix_audio_tracks(
+                tracks=tracks,
                 output_wav_path=output_path,
-                original_gain_db=original_gain_db,
-                dub_gain_db=dub_gain_db,
+                total_duration_ms=self.gui._audio_total_duration_ms(),
             )
-            
-            print(f"[Export] Mixed audio created: {output_path}")
+            print(f"[Export] Mixed timeline audio created: {output_path}")
             return output_path
         except Exception as e:
-            print(f"[Export] Failed to regenerate mixed audio: {e}")
+            print(f"[Export] Failed to mix timeline audio: {e}")
             import traceback
             traceback.print_exc()
             return ""
@@ -912,7 +953,7 @@ class PreviewController:
             QMessageBox.warning(
                 self.gui,
                 "Error",
-                "Selected audio source is not ready. Generate voice/mix first, or switch to 'Use existing mixed audio' and choose a valid file.",
+                "No active audio track is ready. Generate the voice or add a Music Layer, then check Track Volumes.",
             )
             return
 
@@ -1031,7 +1072,7 @@ class PreviewController:
             QMessageBox.warning(
                 self.gui,
                 "Error",
-                "Selected audio source is not ready. Generate voice/mix first, or switch to 'Use existing mixed audio' and choose a valid file.",
+                "No active audio track is ready. Generate the voice or add a Music Layer, then check Track Volumes.",
             )
             return
 
@@ -1332,7 +1373,7 @@ class PreviewController:
             QMessageBox.warning(
                 self.gui,
                 "Error",
-                "Selected audio source is not ready. Generate voice/mix first, or switch to 'Use existing mixed audio' and choose a valid file.",
+                "No active audio track is ready. Generate the voice or add a Music Layer, then check Track Volumes.",
             )
             return
 

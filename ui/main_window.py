@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QToolButton, QLabel, QLineEdit,
                              QFileDialog, QTextEdit, QComboBox,
-                             QDoubleSpinBox,
                              QFrame, QProgressBar, QMessageBox,
                              QScrollArea,
                              QColorDialog, QTabWidget, QDialog, QSizePolicy, QInputDialog, QLayout)
@@ -75,6 +74,7 @@ from utils.media_utils import (
 from utils.settings_utils import load_user_settings as load_user_settings_impl, save_user_settings as save_user_settings_impl
 from views import build_main_window_ui
 from widgets.progress_dialog import BackgroundableProgressDialog
+from widgets.spin_boxes import ReliableDoubleSpinBox
 from widgets.subtitle_editor_dialog import SubtitleEditorDialog
 from runtime_paths import app_path, asset_path, bundle_root, models_path, workspace_root
 from runtime_profile import is_remote_profile
@@ -2568,6 +2568,12 @@ class VideoTranslatorGUI(QMainWindow):
         return label
 
     def using_existing_audio_source(self) -> bool:
+        # The Audio Source selector was replaced by timeline audio tracks.
+        # Legacy radio controls may still exist in older project/settings
+        # data, but they are not part of the active UI and must not bypass
+        # A1/TS1/Music track composition.
+        if not hasattr(self, "existing_audio_source_panel"):
+            return False
         mixed_path = self._normalize_local_file_path(
             self.mixed_audio_edit.text().strip() if hasattr(self, "mixed_audio_edit") else ""
         )
@@ -2601,16 +2607,265 @@ class VideoTranslatorGUI(QMainWindow):
     def resolve_selected_audio_path(self) -> str:
         if self.using_existing_audio_source():
             return self._normalize_local_file_path(self.mixed_audio_edit.text().strip())
-        candidates = [
-            self.processed_artifacts.get("mixed_vi"),
-            self.last_mixed_vi_path,
-            self.last_voice_vi_path,
-        ]
-        for candidate in candidates:
-            normalized = self._normalize_local_file_path(candidate)
-            if normalized and os.path.exists(normalized):
-                return normalized
+        music_tracks = self._music_audio_tracks()
+        try:
+            voice_path = self._resolve_preview_voice_only_audio_path()
+        except Exception:
+            voice_path = ""
+        tts_state = self._tts_audio_track_state()
+        if voice_path and not bool(tts_state.get("muted", False)) and float(tts_state.get("volume", 100.0)) > 0.0:
+            return voice_path
+        # A Music Layer is also a valid audio source for composed export when
+        # TTS has not been generated (or has been muted). Respect its actual
+        # volume/mute state so a zeroed track cannot re-enter export through a
+        # stale raw-path fallback.
+        for item in music_tracks:
+            if bool(item.get("muted", False)) or float(item.get("volume", 0.0)) <= 0.0:
+                continue
+            candidate = self._normalize_local_file_path(item.get("path", ""))
+            if candidate and os.path.exists(candidate):
+                return candidate
+        # Legacy projects without a usable timeline voice/music state may
+        # still have a cached mixed_vi artifact. Only use it when no active
+        # independent tracks are present, preventing old audio from bypassing
+        # the new per-track volume controls.
+        if not music_tracks and not voice_path:
+            for candidate in (
+                self.processed_artifacts.get("mixed_vi"),
+                self.last_mixed_vi_path,
+            ):
+                normalized = self._normalize_local_file_path(candidate)
+                if normalized and os.path.exists(normalized):
+                    return normalized
         return ""
+
+    def _music_audio_tracks(self) -> list[dict]:
+        """Return active Music Layer entries in the timeline.
+
+        Music is intentionally modeled separately from the source video's A1
+        audio and the generated TS1 voice.  The returned dictionaries are the
+        common input format used by preview and export mixing.
+        """
+        timeline = getattr(self, "timeline", None)
+        model = getattr(timeline, "_timeline", None) if timeline is not None else None
+        if model is None:
+            return []
+        tracks = []
+        for track in getattr(model, "tracks", []) or []:
+            metadata = getattr(track, "metadata", {}) or {}
+            name = str(getattr(track, "name", "") or "")
+            role = str(metadata.get("_audio_role", "") or "").strip().lower()
+            if role != "music" and name.lower() not in {"a2 music", "music"}:
+                continue
+            try:
+                track_volume = float(metadata.get("_volume", 30.0))
+            except (TypeError, ValueError):
+                track_volume = 30.0
+            track_muted = bool(
+                getattr(track, "muted", False)
+                or metadata.get("_muted", False)
+                or self._is_audio_track_muted(name)
+            )
+            track_visible = bool(getattr(track, "visible", True))
+            track_solo = bool(getattr(track, "solo", False) or metadata.get("_solo", False))
+            for layer in getattr(track, "layers", []) or []:
+                source = self._normalize_local_file_path(str(getattr(layer, "source", "") or ""))
+                if not source or not os.path.exists(source):
+                    continue
+                start = max(0.0, float(getattr(layer, "start", 0.0) or 0.0))
+                end = max(start, float(getattr(layer, "end", 0.0) or 0.0))
+                tracks.append({
+                    "path": source,
+                    "start": start,
+                    "end": end,
+                    "source_start": float(getattr(layer, "source_start", 0.0) or 0.0),
+                    "volume": track_volume,
+                    "muted": (
+                        track_muted
+                        or not track_visible
+                        or not bool(getattr(layer, "visible", True))
+                        or bool(getattr(layer, "muted", False))
+                    ),
+                    "solo": track_solo,
+                    "loop": True,
+                    "track_name": name or "A2 Music",
+                    "legacy": False,
+                })
+        # Projects created before Music Layer became a first-class timeline
+        # track may still persist the selected background stem as the
+        # project-level ``music`` artifact.  Keep that audio usable instead
+        # of silently falling back to A1 Original only.  A real A2 Music
+        # track always wins, so this cannot duplicate a current layer.
+        if not tracks:
+            legacy_path = self._normalize_local_file_path(
+                str(getattr(self, "last_music_path", "") or "")
+            )
+            if legacy_path and os.path.exists(legacy_path):
+                try:
+                    legacy_volume = float(
+                        self.audio_music_volume_slider.value()
+                        if hasattr(self, "audio_music_volume_slider")
+                        else 30.0
+                    )
+                except (TypeError, ValueError):
+                    legacy_volume = 30.0
+                tracks.append({
+                    "path": legacy_path,
+                    "start": 0.0,
+                    "end": max(0.0, float(getattr(model, "duration", 0.0) or 0.0)),
+                    "source_start": 0.0,
+                    "volume": legacy_volume,
+                    "muted": False,
+                    "solo": False,
+                    "loop": True,
+                    "track_name": "A2 Music",
+                    "legacy": True,
+                })
+        return tracks
+
+    def _tts_audio_track_state(self) -> dict:
+        """Return the generated voice track's timeline volume/mute state."""
+        timeline = getattr(self, "timeline", None)
+        model = getattr(timeline, "_timeline", None) if timeline is not None else None
+        state = {"volume": 100.0, "muted": False, "solo": False, "track_name": "TS1"}
+        for track in getattr(model, "tracks", []) or [] if model is not None else []:
+            name = str(getattr(track, "name", "") or "")
+            if name not in ("TS1", "A2 Dub"):
+                continue
+            metadata = getattr(track, "metadata", {}) or {}
+            try:
+                state["volume"] = float(metadata.get("_volume", 100.0))
+            except (TypeError, ValueError):
+                state["volume"] = 100.0
+            state["muted"] = bool(
+                getattr(track, "muted", False)
+                or metadata.get("_muted", False)
+                or self._is_audio_track_muted(name)
+            )
+            state["solo"] = bool(getattr(track, "solo", False) or metadata.get("_solo", False))
+            state["track_name"] = name
+            break
+        return state
+
+    def _audio_track_is_soloed(self, track_name: str) -> bool:
+        timeline = getattr(self, "timeline", None)
+        model = getattr(timeline, "_timeline", None) if timeline is not None else None
+        if model is None:
+            return False
+        for track in getattr(model, "tracks", []) or []:
+            name = str(getattr(track, "name", "") or "")
+            metadata = getattr(track, "metadata", {}) or {}
+            if name == track_name:
+                return bool(getattr(track, "solo", False) or metadata.get("_solo", False))
+        return False
+
+    def _audio_total_duration_ms(self) -> int:
+        try:
+            duration = int(getattr(self.media_player, "duration", lambda: 0)() or 0)
+        except Exception:
+            duration = 0
+        if duration <= 0:
+            try:
+                duration = int(getattr(self.timeline, "duration", 0) or 0)
+            except Exception:
+                duration = 0
+        return max(0, duration)
+
+    def _refresh_music_layer_summary(self):
+        label = getattr(self, "music_layers_summary_label", None)
+        entries = self._music_audio_tracks()
+        # The optional volume row is shown only for a real timeline Music
+        # Layer.  Legacy project-level music artifacts remain usable for
+        # playback/export but should not make the optional control appear as
+        # if a new layer had been added.
+        volume_row = getattr(self, "audio_music_volume_row", None)
+        if volume_row is not None:
+            volume_row.setVisible(any(not bool(item.get("legacy", False)) for item in entries))
+        if label is None:
+            return
+        if not entries:
+            label.setText("No music layer added.")
+            return
+        names = []
+        for entry in entries:
+            names.append(os.path.basename(str(entry.get("path", ""))) or "Music")
+        label.setText(f"{len(names)} music layer(s): " + ", ".join(names))
+
+    def add_music_layer(self):
+        """Choose an audio file and add it as an independent timeline track."""
+        if self._preview_is_playing():
+            return
+        video_path = str(getattr(self, "video_path_edit", None).text() if hasattr(self, "video_path_edit") else "").strip()
+        if not video_path or not os.path.exists(video_path):
+            QMessageBox.information(self, "Add Music Layer", "Select a video before adding music.")
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Background Music",
+            "",
+            "Audio Files (*.wav *.mp3 *.flac *.m4a *.aac *.ogg);;All Files (*)",
+        )
+        if not path:
+            return
+        normalized = self._normalize_local_file_path(path)
+        if not normalized or not os.path.exists(normalized):
+            return
+        timeline = getattr(self, "timeline", None)
+        model = getattr(timeline, "_timeline", None) if timeline is not None else None
+        if model is None:
+            return
+        from app.layers.audio import AudioLayer
+        from app.layers.base import LayerType
+        from app.layers.sync_bridge import find_or_create_track
+
+        duration = max(0.1, float(getattr(model, "duration", 0.0) or 0.0))
+        track = find_or_create_track(model, "A2 Music", LayerType.AUDIO, 80)
+        if not isinstance(track.metadata, dict):
+            track.metadata = {}
+        track.metadata["_audio_role"] = "music"
+        track.metadata.setdefault("_volume", 30.0)
+        track.metadata.setdefault("_muted", False)
+        layer = AudioLayer(
+            name=f"Music {len(track.layers) + 1}",
+            source=normalized,
+            start=0.0,
+            end=duration,
+            volume=float(track.metadata.get("_volume", 30.0)) / 100.0,
+        )
+        layer.metadata["_audio_role"] = "music"
+        track.layers.append(layer)
+        if hasattr(timeline, "_track_heights"):
+            timeline._track_heights[track.id] = int(track.height or 80)
+        try:
+            self.bg_music_edit.setText(normalized)
+        except Exception:
+            pass
+        self.last_music_path = normalized
+        self.processed_artifacts["music"] = normalized
+        if hasattr(self, "update_project_artifact"):
+            self.update_project_artifact("music", normalized)
+        timeline._redraw()
+        self._sync_audio_mix_controls_from_tracks()
+        self._refresh_music_layer_summary()
+        try:
+            timeline.select_layer(layer.id)
+            self.on_timeline_layer_selected(layer.id)
+        except Exception:
+            pass
+        self.persist_current_timeline_project_data()
+        self._schedule_preview_audio_refresh(force=True)
+
+    def _schedule_preview_audio_refresh(self, *, force: bool = False):
+        if getattr(self, "_preview_audio_track_switching", False):
+            return
+        timer = getattr(self, "_music_preview_refresh_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(120)
+            timer.timeout.connect(lambda: self.sync_preview_audio_track_to_output(apply_to_player=True, force=True))
+            self._music_preview_refresh_timer = timer
+        timer.start(0 if force else 120)
 
     def _resolve_preview_voice_only_audio_path(self) -> str:
         if self.using_existing_audio_source():
@@ -2623,19 +2878,51 @@ class VideoTranslatorGUI(QMainWindow):
             normalized = self._normalize_local_file_path(candidate)
             if normalized and os.path.exists(normalized):
                 return normalized
+        # Older projects may have persisted the generated WAV only on the
+        # TS1 DubSubtitle layers, without a top-level voice_vi artifact.  Use
+        # that canonical layer reference as a recovery path after reopening.
+        timeline = getattr(self, "timeline", None)
+        model = getattr(timeline, "_timeline", None) if timeline is not None else None
+        for track in getattr(model, "tracks", []) or [] if model is not None else []:
+            if str(getattr(track, "name", "")) not in ("TS1", "A2 Dub"):
+                continue
+            for layer in getattr(track, "layers", []) or []:
+                metadata = getattr(layer, "metadata", {}) or {}
+                for candidate in (
+                    getattr(layer, "audio_path", ""),
+                    metadata.get("audio_path", ""),
+                    metadata.get("_audio_path", ""),
+                ):
+                    normalized = self._normalize_local_file_path(candidate)
+                    if normalized and os.path.exists(normalized):
+                        return normalized
+        # Legacy releases sometimes stored only mixed_vi.  It is still a
+        # valid dubbed sidecar when there is no separate Music Layer.
+        if not self._music_audio_tracks():
+            for candidate in (
+                self.processed_artifacts.get("mixed_vi"),
+                self.last_mixed_vi_path,
+            ):
+                normalized = self._normalize_local_file_path(candidate)
+                if normalized and os.path.exists(normalized):
+                    return normalized
         return ""
 
     def _resolve_preview_background_audio_path(self) -> str:
-        audio_mode_key = str(self.get_audio_handling_mode() or "fast").strip().lower()
-        if audio_mode_key == "clean":
-            candidates = [self.last_music_path]
-        else:
-            candidates = [
-                self.audio_source_edit.text().strip() if hasattr(self, "audio_source_edit") else "",
-                self.processed_artifacts.get("audio_extracted"),
-                self.last_extracted_audio,
-                self.last_music_path,
-            ]
+        # A Music Layer is the only source that should be mixed with TTS.
+        # Never silently substitute the source video's extracted audio here:
+        # A1 remains an independent track and can be muted separately.
+        music_tracks = self._music_audio_tracks()
+        if music_tracks:
+            return str(music_tracks[0].get("path", "") or "")
+        # Keep a narrow legacy fallback for projects created before Music
+        # Layer existed.  Explicitly selected background audio is stored in
+        # bg_music_edit/last_music_path; the ordinary extracted A1 audio is
+        # deliberately not considered a background bed anymore.
+        candidates = [
+            self.bg_music_edit.text().strip() if hasattr(self, "bg_music_edit") else "",
+            self.last_music_path,
+        ]
         for candidate in candidates:
             normalized = self._normalize_local_file_path(candidate)
             if normalized and os.path.exists(normalized):
@@ -2647,36 +2934,39 @@ class VideoTranslatorGUI(QMainWindow):
             audio_path = self._normalize_local_file_path(self.mixed_audio_edit.text().strip())
             return audio_path if audio_path and os.path.exists(audio_path) else ""
         voice_only = self._resolve_preview_voice_only_audio_path()
-        background_audio = self._resolve_preview_background_audio_path()
-        if not voice_only or not background_audio:
+        music_tracks = self._music_audio_tracks()
+        # The dubbed sidecar may contain TTS, music, or both.  Do not require
+        # a voice file here: a project with a muted/skipped TTS track and an
+        # active Music Layer must still be previewable and exportable.
+        if not voice_only and not music_tracks:
             return ""
 
-        try:
-            voice_stat = os.stat(voice_only)
-            background_stat = os.stat(background_audio)
-        except OSError:
-            return ""
-
-        segments = list(self.get_active_segments() or [])
-        audio_mode_key = str(self.get_audio_handling_mode() or "fast").strip().lower()
-        original_volume = int(self.audio_a1_volume_slider.value()) if hasattr(self, "audio_a1_volume_slider") else 50
-        dub_volume = int(self.audio_a2_volume_slider.value()) if hasattr(self, "audio_a2_volume_slider") else 100
+        tts_state = self._tts_audio_track_state()
+        voice_stat = None
+        if voice_only:
+            try:
+                voice_stat = os.stat(voice_only)
+            except OSError:
+                voice_only = ""
         signature_payload = {
-            "voice": os.path.abspath(voice_only),
-            "voice_size": int(voice_stat.st_size),
-            "voice_mtime_ns": int(getattr(voice_stat, "st_mtime_ns", int(voice_stat.st_mtime * 1_000_000_000))),
-            "background": os.path.abspath(background_audio),
-            "background_size": int(background_stat.st_size),
-            "background_mtime_ns": int(getattr(background_stat, "st_mtime_ns", int(background_stat.st_mtime * 1_000_000_000))),
-            "audio_mode": audio_mode_key,
-            "original_volume": original_volume,
-            "dub_volume": dub_volume,
-            "segments": [
+            "kind": "tts-plus-music-v1",
+            "voice": os.path.abspath(voice_only) if voice_only else "",
+            "voice_size": int(voice_stat.st_size) if voice_stat is not None else 0,
+            "voice_mtime_ns": int(getattr(voice_stat, "st_mtime_ns", int(voice_stat.st_mtime * 1_000_000_000))) if voice_stat is not None else 0,
+            "tts_volume": round(float(tts_state.get("volume", 100.0)), 3),
+            "tts_muted": bool(tts_state.get("muted", False)),
+            "music": [
                 {
-                    "start": round(float(seg.get("start", 0.0)), 3),
-                    "end": round(float(seg.get("end", 0.0)), 3),
+                    "path": os.path.abspath(str(item.get("path", ""))),
+                    "size": int(os.path.getsize(str(item.get("path", "")))),
+                    "mtime_ns": int(os.stat(str(item.get("path", ""))).st_mtime_ns),
+                    "start": round(float(item.get("start", 0.0)), 3),
+                    "end": round(float(item.get("end", 0.0)), 3),
+                    "source_start": round(float(item.get("source_start", 0.0)), 3),
+                    "volume": round(float(item.get("volume", 30.0)), 3),
+                    "muted": bool(item.get("muted", False)),
                 }
-                for seg in segments
+                for item in music_tracks
             ],
         }
         mix_hash = hashlib.sha1(json.dumps(signature_payload, ensure_ascii=True, sort_keys=True).encode("utf-8")).hexdigest()[:16]
@@ -2685,18 +2975,30 @@ class VideoTranslatorGUI(QMainWindow):
             return output_path
 
         try:
-            from audio_mixer import mix_original_with_dub
-            original_gain_db = self._percent_to_db(original_volume)
-            dub_gain_db = self._percent_to_db(dub_volume)
-            mix_original_with_dub(
-                original_wav_path=background_audio,
-                dub_wav_path=voice_only,
+            from audio_mixer import mix_audio_tracks
+            tracks = []
+            if voice_only:
+                tracks.append({
+                    "path": voice_only,
+                    "start": 0.0,
+                    "end": self._audio_total_duration_ms() / 1000.0,
+                    "volume": float(tts_state.get("volume", 100.0)),
+                    "muted": bool(tts_state.get("muted", False)),
+                })
+            tracks.extend(music_tracks)
+            mix_audio_tracks(
+                tracks=tracks,
                 output_wav_path=output_path,
-                original_gain_db=original_gain_db,
-                dub_gain_db=dub_gain_db,
+                total_duration_ms=self._audio_total_duration_ms(),
             )
         except Exception as exc:
-            self.log(f"[Preview] timeline mix fallback to voice-only: {exc}")
+            # A project may legitimately have no active dubbed/music track
+            # yet (for example before TTS generation, or when both tracks
+            # are muted).  Treat that as a silent sidecar rather than an
+            # error emitted on every preview refresh; unexpected mixer
+            # failures remain visible in the runtime log.
+            if not (isinstance(exc, ValueError) and "No active audio tracks" in str(exc)):
+                self.log(f"[Preview] timeline audio mix unavailable: {exc}")
             return ""
         return output_path
 
@@ -2747,7 +3049,7 @@ class VideoTranslatorGUI(QMainWindow):
         if self.using_existing_audio_source():
             audio_path = self._normalize_local_file_path(self.mixed_audio_edit.text().strip())
             return bool(audio_path and os.path.exists(audio_path))
-        return bool(self._resolve_preview_voice_only_audio_path())
+        return bool(self._resolve_preview_voice_only_audio_path() or self._music_audio_tracks())
 
     def _timeline_audio_track_mutes(self) -> tuple[bool, bool] | None:
         if not hasattr(self, "timeline") or not getattr(self.timeline, "_timeline", None):
@@ -2755,10 +3057,12 @@ class VideoTranslatorGUI(QMainWindow):
         a1_muted = None
         a2_muted = None
         for track in self.timeline._timeline.tracks:
+            metadata = getattr(track, "metadata", {}) or {}
+            muted = bool(getattr(track, "muted", False) or metadata.get("_muted", False))
             if track.name == "A1 Audio":
-                a1_muted = bool(track.muted)
+                a1_muted = muted
             elif track.name in ("A2 Dub", "TS1"):
-                a2_muted = bool(track.muted)
+                a2_muted = muted
         if a1_muted is None and a2_muted is None:
             return None
         return bool(a1_muted), bool(a2_muted)
@@ -2766,9 +3070,8 @@ class VideoTranslatorGUI(QMainWindow):
     def _resolve_preview_dubbed_playback_source(self) -> tuple[str, str]:
         """Resolve which audio file represents the dubbed track in preview.
 
-        For preview we want PURE TTS (voice_vi) so the user hears only
-        the new dub voice with natural gaps between segments. The mixed
-        (TTS+background) version is only used for final export.
+        With a Music Layer, preview uses the cached TTS+music render so its
+        track volumes match export. Without one, it falls back to pure TTS.
 
         Returns ("voice", path) | ("mixed", path) | ("original", "").
         """
@@ -2777,20 +3080,23 @@ class VideoTranslatorGUI(QMainWindow):
         mixed_audio = self._resolve_preview_mixed_audio_path()
 
         if not track_mutes:
-            if voice_only:
-                return "voice", voice_only
             if mixed_audio:
                 return "mixed", mixed_audio
+            if voice_only:
+                return "voice", voice_only
             return "original", ""
 
         a1_muted, a2_muted = track_mutes
-        if a2_muted:
-            return "original", ""
-        # Prefer pure TTS for preview in all other cases.
-        if voice_only:
-            return "voice", voice_only
+        # A muted TS1 track does not imply the Music Layer is muted.  When a
+        # composed sidecar exists, it is rebuilt without TTS and returned so
+        # music remains audible independently.
         if mixed_audio:
             return "mixed", mixed_audio
+        if a2_muted:
+            return "original", ""
+        # With no Music Layer the generated voice can be played directly.
+        if voice_only:
+            return "voice", voice_only
         return "original", ""
 
     def _preview_audio_track_choices(self) -> list[tuple[str, str]]:
@@ -2803,7 +3109,10 @@ class VideoTranslatorGUI(QMainWindow):
         track_mutes = self._timeline_audio_track_mutes()
         if track_mutes:
             _a1_muted, a2_muted = track_mutes
-            if a2_muted:
+            # A2 mute applies only to TTS.  Music is composed into the
+            # dubbed sidecar independently, so keep that sidecar selected
+            # when a Music Layer exists.
+            if a2_muted and not self._music_audio_tracks():
                 return "original"
         mode = str(self.get_output_mode_key() or "subtitle").strip().lower()
         if mode in ("voice", "both"):
@@ -2839,10 +3148,16 @@ class VideoTranslatorGUI(QMainWindow):
         if not source_video:
             return
 
-        # Always load BOTH the original audio file (extracted audio) and
-        # the dubbed audio file as separate sidecar streams. Per-track mute
-        # is controlled by the timeline track labels (A1 Original / A2 Dub).
-        dubbed_audio_kind, dubbed_audio = self._resolve_preview_dubbed_playback_source()
+        # Always load the original audio sidecar. Resolve/build the composed
+        # dubbed sidecar only when the current output mode actually selects
+        # it; otherwise a subtitle-only/original preview would needlessly
+        # attempt a TTS+Music mix and report "No active audio tracks".
+        preferred_mode = self._preferred_preview_audio_track_mode()
+        selected_mode = str(getattr(self, "_preview_audio_track_mode", "") or preferred_mode).strip().lower()
+        if selected_mode == "dubbed":
+            dubbed_audio_kind, dubbed_audio = self._resolve_preview_dubbed_playback_source()
+        else:
+            dubbed_audio_kind, dubbed_audio = "original", ""
         if not dubbed_audio or dubbed_audio_kind == "original":
             dubbed_audio = ""
         original_audio = self._resolve_preview_original_audio_path()
@@ -2879,8 +3194,41 @@ class VideoTranslatorGUI(QMainWindow):
                         self.media_player._clear_original_audio()
                     except Exception:
                         pass
+            # Re-apply persisted A1 level/mute after replacing the sidecar.
+            # QMediaPlayer resets the output volume when a new audio source
+            # is opened, which otherwise makes a restored 0%/custom level
+            # appear to be ignored until the slider is touched.
+            try:
+                original_volume = self._compute_audio_track_volume("A1 Audio", base=100.0)
+                original_gain = self._get_audio_track_gain_db("A1 Audio")
+                original_volume *= 10 ** (original_gain / 20.0)
+                if hasattr(self.media_player, "set_original_volume"):
+                    self.media_player.set_original_volume(max(0.0, min(200.0, original_volume)))
+                if hasattr(self.media_player, "set_mute_original"):
+                    self.media_player.set_mute_original(self._is_audio_track_muted("A1 Audio"))
+            except Exception:
+                pass
             if dubbed_audio:
                 self.media_player.set_audio_file(dubbed_audio)
+                try:
+                    if dubbed_audio_kind == "mixed":
+                        # TTS and Music volumes are already baked into the
+                        # composed WAV; never apply TS1's level to the whole
+                        # sidecar a second time.
+                        if hasattr(self.media_player, "set_dubbed_volume"):
+                            self.media_player.set_dubbed_volume(100.0)
+                        if hasattr(self.media_player, "set_mute_dubbed"):
+                            self.media_player.set_mute_dubbed(False)
+                    else:
+                        dubbed_volume = self._compute_audio_track_volume("TS1", base=100.0)
+                        dubbed_gain = self._get_audio_track_gain_db("TS1")
+                        dubbed_volume *= 10 ** (dubbed_gain / 20.0)
+                        if hasattr(self.media_player, "set_dubbed_volume"):
+                            self.media_player.set_dubbed_volume(max(0.0, min(200.0, dubbed_volume)))
+                        if hasattr(self.media_player, "set_mute_dubbed"):
+                            self.media_player.set_mute_dubbed(self._is_audio_track_muted("TS1"))
+                except Exception:
+                    pass
             else:
                 self.media_player.clear_audio()
             if current_position > 0:
@@ -2914,17 +3262,11 @@ class VideoTranslatorGUI(QMainWindow):
     def _resolve_preview_original_audio_path(self) -> str:
         """Resolve the original audio file path (separate from source video).
 
-        Fast mode: full extracted audio (vocals + music)
-        Clean mode: background stem only (no vocals, to avoid double voices)
-        Fallback: extracted_audio artifact
+        A1 always represents the source video's original audio.  Audio
+        Processing/Clean mode no longer changes this track; separated stems
+        are only used when the user explicitly adds a Music Layer.
         """
-        audio_mode = str(self.get_audio_handling_mode() or "fast").strip().lower()
         candidates: list[str] = []
-        if audio_mode == "clean":
-            candidates.extend([
-                self.last_music_path,
-                self.processed_artifacts.get("music"),
-            ])
         candidates.extend([
             self.processed_artifacts.get("extracted_audio"),
             self.last_extracted_audio,
@@ -3188,47 +3530,55 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "timeline"):
             self.timeline.set_video_thumbnails(self._timeline_video_thumbnails)
 
-    def on_audio_source_mode_changed(self):
-        if not hasattr(self, "audio_source_hint_label"):
-            return
-        using_existing = bool(hasattr(self, "use_existing_audio_radio") and self.use_existing_audio_radio.isChecked())
-        if using_existing:
-            self.audio_source_hint_label.setText(
-                "Use a completed audio file for preview and export. TTS and background-audio settings are not used."
-            )
-        else:
-            self.audio_source_hint_label.setText(
-                "Create a voice from translated subtitles. You can optionally mix in background audio."
-            )
-        generated_panel = getattr(self, "generated_audio_source_panel", None)
-        if generated_panel:
-            generated_panel.setVisible(not using_existing)
-        existing_panel = getattr(self, "existing_audio_source_panel", None)
-        if existing_panel:
-            existing_panel.setVisible(using_existing)
-        generated_widgets = [
-            "generated_audio_section_label",
-            "generated_audio_section_hint",
+    def _hide_legacy_audio_source_controls(self):
+        """Keep pre-timeline Audio Source widgets out of the active UI.
+
+        Older projects still load a handful of compatibility widgets because
+        runtime code and settings migration reference their values.  They are
+        deliberately not part of the current Audio tab, which is based on
+        independent A1/TS1/Music tracks.  Centralising the hide operation also
+        prevents a legacy refresh path from making the old radio buttons
+        visible again after output-mode or project-state updates.
+        """
+        legacy_widget_names = (
+            "use_generated_audio_radio",
+            "use_existing_audio_radio",
+            "audio_source_hint_label",
             "bg_music_label",
             "bg_music_edit",
             "browse_bg_music_btn",
-            "voiceover_btn",
-        ]
-        existing_widgets = [
-            "existing_audio_section_label",
-            "existing_audio_section_hint",
             "mixed_audio_label",
             "mixed_audio_edit",
             "browse_mixed_audio_btn",
-        ]
-        for name in generated_widgets:
+            "generated_audio_section_label",
+            "generated_audio_section_hint",
+            "existing_audio_section_label",
+            "existing_audio_section_hint",
+        )
+        for name in legacy_widget_names:
             widget = getattr(self, name, None)
-            if widget:
-                widget.setEnabled(not using_existing)
-        for name in existing_widgets:
-            widget = getattr(self, name, None)
-            if widget:
-                widget.setEnabled(using_existing)
+            if widget is None:
+                continue
+            try:
+                widget.hide()
+                widget.setVisible(False)
+            except RuntimeError:
+                # A Qt object may have been deleted during a UI rebuild.
+                continue
+        for name in ("generated_audio_source_panel", "existing_audio_source_panel"):
+            panel = getattr(self, name, None)
+            if panel is None:
+                continue
+            try:
+                panel.hide()
+                panel.setVisible(False)
+            except RuntimeError:
+                continue
+
+    def on_audio_source_mode_changed(self):
+        # The old source selector is compatibility-only.  Always force it
+        # hidden before handling any legacy state refresh.
+        self._hide_legacy_audio_source_controls()
         self.schedule_timeline_visual_refresh(waveform=True, thumbnails=False)
         self.refresh_ui_state()
 
@@ -4004,7 +4354,10 @@ class VideoTranslatorGUI(QMainWindow):
         """
         if not hasattr(self, "timeline") or not self.timeline._timeline:
             return
-        core_track_names = {"V1 Video", "A1 Audio", "TS1"}
+        # Music is a first-class project audio track, so retain it alongside
+        # the source and generated-voice tracks when the editor session is
+        # cached/reopened.
+        core_track_names = {"V1 Video", "A1 Audio", "TS1", "A2 Music"}
         timeline = self.timeline._timeline
         removed = [track for track in timeline.tracks if track.name not in core_track_names]
         if removed:
@@ -4122,6 +4475,7 @@ class VideoTranslatorGUI(QMainWindow):
         self.last_vocals_path = ""
         # Sync timeline track mute -> GUI per-track mute state
         self._sync_timeline_mute_to_gui()
+        self._sync_audio_mix_controls_from_tracks()
         self.last_music_path = ""
         self.last_voice_vi_path = ""
         self.last_mixed_vi_path = ""
@@ -4185,6 +4539,7 @@ class VideoTranslatorGUI(QMainWindow):
             if hasattr(self, "audio_tab_btn"):
                 self.audio_tab_btn.setEnabled(True)
         self._sync_timeline_mute_to_gui()
+        self._sync_audio_mix_controls_from_tracks()
         # OCR geometry is project-scoped.  For a reopened OCR project that has
         # not produced a transcript yet, keep the crop editor visible so the
         # user can configure the region before running Transcript.  Completed
@@ -4278,43 +4633,19 @@ class VideoTranslatorGUI(QMainWindow):
             self.refresh_timeline_video_thumbnails()
 
     def resolve_background_audio_path(self) -> str:
+        # Voice generation receives only an explicitly added Music Layer (or
+        # the legacy manually selected background path).  The source video's
+        # extracted A1 audio is never implicitly treated as music.
+        music_tracks = self._music_audio_tracks()
+        if music_tracks:
+            return str(music_tracks[0].get("path", "") or "")
         manual_candidate = self.bg_music_edit.text().strip() if hasattr(self, "bg_music_edit") else ""
-        if manual_candidate:
-            normalized = self._normalize_local_file_path(manual_candidate)
-            if normalized and os.path.exists(normalized):
-                self.last_music_path = normalized
-                self.processed_artifacts["music"] = normalized
-                return normalized
-
-        audio_mode = self.get_audio_handling_mode()
-        state_artifacts = getattr(getattr(self, "current_project_state", None), "artifacts", {}) if getattr(self, "current_project_state", None) else {}
-        candidates = []
-        if audio_mode == "clean":
-            candidates.extend(
-                [
-                    getattr(self, "last_music_path", ""),
-                    state_artifacts.get("music", ""),
-                    getattr(self, "last_extracted_audio", ""),
-                    state_artifacts.get("extracted_audio", ""),
-                ]
-            )
-        else:
-            candidates.extend(
-                [
-                    getattr(self, "last_extracted_audio", ""),
-                    state_artifacts.get("extracted_audio", ""),
-                    getattr(self, "last_music_path", ""),
-                    state_artifacts.get("music", ""),
-                ]
-            )
+        candidates = [manual_candidate, getattr(self, "last_music_path", "")]
         for candidate in candidates:
             normalized = self._normalize_local_file_path(candidate)
             if normalized and os.path.exists(normalized):
-                if audio_mode == "clean":
-                    self.last_music_path = normalized
-                    self.processed_artifacts["music"] = normalized
-                else:
-                    self.processed_artifacts["background_source"] = normalized
+                self.last_music_path = normalized
+                self.processed_artifacts["music"] = normalized
                 return normalized
         return ""
 
@@ -5068,14 +5399,10 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "styled_preview_btn"):
             self.styled_preview_btn.setVisible(show_voice)
         self.mixed_audio_edit.setEnabled(show_voice)
-        if hasattr(self, "use_generated_audio_radio"):
-            self.use_generated_audio_radio.setVisible(show_voice)
-        if hasattr(self, "use_existing_audio_radio"):
-            self.use_existing_audio_radio.setVisible(show_voice)
-        if hasattr(self, "browse_bg_music_btn"):
-            self.browse_bg_music_btn.setVisible(show_voice)
-        if hasattr(self, "browse_mixed_audio_btn"):
-            self.browse_mixed_audio_btn.setVisible(show_voice)
+        # Do not resurrect the pre-timeline Audio Source controls when the
+        # output mode changes.  Music is added through the visible Music Layer
+        # card and mixed via independent track volumes.
+        self._hide_legacy_audio_source_controls()
         self.export_btn.setText(get_export_button_label(mode))
         self.refresh_ui_state()
 
@@ -5324,7 +5651,15 @@ class VideoTranslatorGUI(QMainWindow):
 
     def update_preview_context_label(self, has_subtitles: bool, has_voice_audio: bool):
         subtitle_source = "Vietnamese review track" if self.current_translated_segments else ("original subtitle track" if self.current_segments else "no subtitle track yet")
-        audio_source = "existing mixed audio" if self.using_existing_audio_source() else "generated Vietnamese voice"
+        # Audio is composed from independent timeline tracks now; do not
+        # surface the removed "Use generated..." / "Use existing..." source
+        # selector terminology in the preview context text.
+        audio_parts = []
+        if has_voice_audio:
+            audio_parts.append("generated voice")
+        if self._music_audio_tracks():
+            audio_parts.append("music")
+        audio_source = " + ".join(audio_parts) if audio_parts else "original audio"
         self.preview_context_label.setText(
             build_preview_context_text(
                 video_ready=bool(self.video_path_edit.text().strip()),
@@ -7070,6 +7405,12 @@ class VideoTranslatorGUI(QMainWindow):
                 self._refresh_audio_inspector_dub_voice_buttons()
             except Exception:
                 pass
+        if track_name not in ("A2 Dub", "TS1"):
+            for attr in ("audio_inspector_use_voice_btn", "audio_inspector_regenerate_voice_btn"):
+                button = getattr(self, attr, None)
+                if button is not None:
+                    button.setVisible(False)
+                    button.setEnabled(False)
 
     def _show_default_inspector_for_layer(self, track, layer):
         self._switch_inspector("default")
@@ -7896,6 +8237,7 @@ class VideoTranslatorGUI(QMainWindow):
         if not isinstance(track.metadata, dict):
             track.metadata = {}
         track.metadata["_muted"] = bool(checked)
+        track.muted = bool(checked)
         if hasattr(self, "audio_inspector_mute_btn"):
             self.audio_inspector_mute_btn.setText(
                 "Unmute Track" if checked else "Mute Track"
@@ -7910,6 +8252,15 @@ class VideoTranslatorGUI(QMainWindow):
             track.metadata = {}
         track.metadata["_solo"] = bool(checked)
         self._apply_audio_track_settings(track_name)
+        # Solo changes affect every other audio track.  Re-apply the two
+        # preview sidecars (and rebuild the composed Music/TTS sidecar when
+        # present) so preview follows the same routing used by export.
+        if track_name != "A1 Audio":
+            self._apply_audio_track_settings("A1 Audio")
+        if track_name not in ("A2 Dub", "TS1"):
+            self._apply_audio_track_settings("TS1")
+        if self._music_audio_tracks():
+            self._schedule_preview_audio_refresh(force=True)
 
     def _refresh_audio_inspector_dub_voice_buttons(self):
         """Enable/disable Dub Voice buttons and populate shared/tabs."""
@@ -7997,7 +8348,21 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "audio_a2_volume_label"):
             self.audio_a2_volume_label.setText(f"{int(value)}%")
         self._sync_audio_track_volume("TS1", int(value))
+        # Music is composed into the dubbed sidecar.  Changing the TTS level
+        # must rebuild that sidecar even when the TTS level becomes 0%, so the
+        # music-only result is loaded instead of leaving the previous render.
+        if self._music_audio_tracks():
+            self._schedule_preview_audio_refresh(force=True)
         self._set_audio_mix_preset_custom()
+
+    def on_audio_music_volume_changed(self, value: int):
+        if hasattr(self, "audio_music_volume_label"):
+            self.audio_music_volume_label.setText(f"{int(value)}%")
+        self._sync_audio_track_volume("A2 Music", int(value))
+        # The music level is baked into the composed dubbed sidecar. Refresh
+        # immediately so a prior original-only sidecar cannot remain audible
+        # after the user enables/raises Music.
+        self._schedule_preview_audio_refresh(force=True)
 
     def _apply_audio_mix_to_tracks(self, a1_val: int, a2_val: int):
         self._sync_audio_track_volume("A1 Audio", a1_val)
@@ -8006,13 +8371,59 @@ class VideoTranslatorGUI(QMainWindow):
     def _sync_audio_track_volume(self, track_name: str, volume: int):
         if not hasattr(self, "timeline") or self.timeline is None:
             return
+        # TS1 is the current dubbed/subtitle track name; A2 Dub is retained
+        # for projects created by older releases.  Treat both as the same
+        # logical TTS volume control so a restored legacy timeline cannot
+        # silently ignore a slider update.
+        names = {str(track_name)}
+        if str(track_name) in {"TS1", "A2 Dub"}:
+            names.update({"TS1", "A2 Dub"})
         for t in self.timeline._timeline.tracks:
-            if t.name == track_name:
+            if str(getattr(t, "name", "")) in names:
                 if not isinstance(t.metadata, dict):
                     t.metadata = {}
                 t.metadata["_volume"] = float(volume)
-                self._apply_audio_track_settings(track_name)
-                break
+                self._apply_audio_track_settings(str(getattr(t, "name", track_name)))
+                self.schedule_timeline_project_persist()
+
+    def _sync_audio_mix_controls_from_tracks(self):
+        """Load timeline track volumes into the Audio tab controls."""
+        if not hasattr(self, "timeline") or not self.timeline._timeline:
+            return
+        values = {
+            "A1 Audio": 50,
+            "TS1": 100,
+            "A2 Dub": 100,
+            "A2 Music": 30,
+        }
+        for track in self.timeline._timeline.tracks:
+            if track.name not in values:
+                continue
+            meta = getattr(track, "metadata", {}) or {}
+            try:
+                values[track.name] = int(round(float(meta.get("_volume", values[track.name]))))
+            except (TypeError, ValueError):
+                pass
+        if hasattr(self, "audio_a1_volume_slider"):
+            self.audio_a1_volume_slider.blockSignals(True)
+            self.audio_a1_volume_slider.setValue(max(0, min(200, values["A1 Audio"])))
+            self.audio_a1_volume_slider.blockSignals(False)
+            if hasattr(self, "audio_a1_volume_label"):
+                self.audio_a1_volume_label.setText(f"{values['A1 Audio']}%")
+        tts_value = values["TS1"] if any(t.name == "TS1" for t in self.timeline._timeline.tracks) else values["A2 Dub"]
+        if hasattr(self, "audio_a2_volume_slider"):
+            self.audio_a2_volume_slider.blockSignals(True)
+            self.audio_a2_volume_slider.setValue(max(0, min(200, tts_value)))
+            self.audio_a2_volume_slider.blockSignals(False)
+            if hasattr(self, "audio_a2_volume_label"):
+                self.audio_a2_volume_label.setText(f"{tts_value}%")
+        if hasattr(self, "audio_music_volume_slider"):
+            self.audio_music_volume_slider.blockSignals(True)
+            self.audio_music_volume_slider.setValue(max(0, min(200, values["A2 Music"])))
+            self.audio_music_volume_slider.blockSignals(False)
+            if hasattr(self, "audio_music_volume_label"):
+                self.audio_music_volume_label.setText(f"{values['A2 Music']}%")
+        self._refresh_music_layer_summary()
 
     def _set_audio_mix_preset_custom(self):
         if not hasattr(self, "audio_mix_preset_combo"):
@@ -8042,15 +8453,33 @@ class VideoTranslatorGUI(QMainWindow):
                 if hasattr(self.media_player, "set_mute_original"):
                     self.media_player.set_mute_original(muted)
             elif track_name in ("A2 Dub", "TS1"):
-                vol = self._compute_audio_track_volume(track_name, base=100.0)
-                gain_db = self._get_audio_track_gain_db(track_name)
-                effective = vol * (10 ** (gain_db / 20.0))
-                effective = max(0.0, min(200.0, effective))
-                if hasattr(self.media_player, "set_dubbed_volume"):
-                    self.media_player.set_dubbed_volume(effective)
-                muted = self._is_audio_track_muted(track_name)
-                if hasattr(self.media_player, "set_mute_dubbed"):
-                    self.media_player.set_mute_dubbed(muted)
+                # When Music is present the dubbed sidecar is a composed
+                # TTS+Music render.  TTS volume/mute must be baked into that
+                # render; applying the TS1 volume to the whole sidecar would
+                # incorrectly attenuate the music as well.
+                # Presence of a Music Layer is enough to choose the composed
+                # sidecar path; avoid resolving/building that mix
+                # synchronously from a slider callback.
+                if bool(self._music_audio_tracks()):
+                    if hasattr(self.media_player, "set_dubbed_volume"):
+                        self.media_player.set_dubbed_volume(100.0)
+                    if hasattr(self.media_player, "set_mute_dubbed"):
+                        self.media_player.set_mute_dubbed(False)
+                    self._schedule_preview_audio_refresh()
+                else:
+                    vol = self._compute_audio_track_volume(track_name, base=100.0)
+                    gain_db = self._get_audio_track_gain_db(track_name)
+                    effective = vol * (10 ** (gain_db / 20.0))
+                    effective = max(0.0, min(200.0, effective))
+                    if hasattr(self.media_player, "set_dubbed_volume"):
+                        self.media_player.set_dubbed_volume(effective)
+                    muted = self._is_audio_track_muted(track_name)
+                    if hasattr(self.media_player, "set_mute_dubbed"):
+                        self.media_player.set_mute_dubbed(muted)
+            elif track_name == "A2 Music":
+                # Music is composed into the dubbed sidecar alongside TS1;
+                # rebuild that lightweight cached mix after a volume change.
+                self._schedule_preview_audio_refresh()
         except Exception:
             pass
 
@@ -8081,11 +8510,17 @@ class VideoTranslatorGUI(QMainWindow):
 
     def _is_audio_track_muted(self, track_name: str) -> bool:
         meta = self._get_audio_track_meta(track_name)
-        if bool(meta.get("_muted", False)):
+        track_obj = None
+        if hasattr(self, "timeline") and self.timeline._timeline:
+            track_obj = next(
+                (t for t in self.timeline._timeline.tracks if t.name == track_name),
+                None,
+            )
+        if bool(meta.get("_muted", False)) or bool(getattr(track_obj, "muted", False)):
             return True
         # A soloed track is never muted by another track's solo. If
         # multiple tracks are soloed, all of them play; the rest are muted.
-        if bool(meta.get("_solo", False)):
+        if bool(meta.get("_solo", False)) or bool(getattr(track_obj, "solo", False)):
             return False
         # If any OTHER audio track is soloed, this one is muted.
         if not hasattr(self, "timeline") or not self.timeline._timeline:
@@ -8093,8 +8528,12 @@ class VideoTranslatorGUI(QMainWindow):
         for t in self.timeline._timeline.tracks:
             if t.name == track_name:
                 continue
-            if str(getattr(t, "name", "")).startswith(("A1", "A2")):
-                if isinstance(t.metadata, dict) and bool(t.metadata.get("_solo", False)):
+            other_name = str(getattr(t, "name", "") or "")
+            is_audio = other_name.startswith(("A1", "A2")) or other_name in ("TS1", "A2 Dub")
+            if is_audio:
+                if bool(getattr(t, "solo", False)) or (
+                    isinstance(t.metadata, dict) and bool(t.metadata.get("_solo", False))
+                ):
                     return True
         return False
 
@@ -8116,6 +8555,9 @@ class VideoTranslatorGUI(QMainWindow):
         for t in self.timeline._timeline.tracks:
             if t.name == track_name:
                 t.muted = is_muted
+                if not isinstance(t.metadata, dict):
+                    t.metadata = {}
+                t.metadata["_muted"] = bool(is_muted)
 
         muted = bool(is_muted)
         if track_name == "A1 Audio":
@@ -8129,14 +8571,28 @@ class VideoTranslatorGUI(QMainWindow):
             self._mute_dubbed = muted
             if hasattr(self, "media_player"):
                 try:
-                    self.media_player.set_mute_dubbed(muted)
+                    # A composed dubbed sidecar may still contain Music;
+                    # rebuild it with TS1 muted instead of muting the whole
+                    # sidecar (which would incorrectly silence Music too).
+                    if bool(self._music_audio_tracks()):
+                        self.media_player.set_mute_dubbed(False)
+                        self._schedule_preview_audio_refresh(force=True)
+                    else:
+                        self.media_player.set_mute_dubbed(muted)
                 except Exception:
                     pass
+
+        if track_name == "A2 Music":
+            # Music shares the generated-audio sidecar, so its mute state is
+            # reflected by rebuilding the TTS+music preview mix.  The track
+            # itself remains independent in the timeline/export model.
+            self._schedule_preview_audio_refresh(force=True)
 
         if hasattr(self, "track_label_bar"):
             self.track_label_bar.set_muted(track_name, muted)
 
         self.schedule_timeline_visual_refresh(waveform=True, thumbnails=False)
+        self.schedule_timeline_project_persist()
 
     def on_track_blur_toggled(self, track_name: str, is_on: bool):
         """Handle B1 track label click - toggle blur effect."""
@@ -8269,11 +8725,16 @@ class VideoTranslatorGUI(QMainWindow):
             return
         a1_muted = False
         a2_muted = False
+        music_muted = False
         for t in self.timeline._timeline.tracks:
+            metadata = getattr(t, "metadata", {}) or {}
+            muted = bool(getattr(t, "muted", False) or metadata.get("_muted", False))
             if t.name == "A1 Audio":
-                a1_muted = bool(t.muted)
+                a1_muted = muted
             elif t.name in ("A2 Dub", "TS1"):
-                a2_muted = bool(t.muted)
+                a2_muted = muted
+            elif t.name == "A2 Music":
+                music_muted = muted
         self._mute_original = a1_muted
         self._mute_dubbed = a2_muted
         if hasattr(self, "media_player"):
@@ -8282,12 +8743,18 @@ class VideoTranslatorGUI(QMainWindow):
             except Exception:
                 pass
             try:
-                self.media_player.set_mute_dubbed(a2_muted)
+                # The dubbed sidecar may contain an independent Music Layer.
+                # A muted TTS track must not mute that whole sidecar; the
+                # compositor removes TTS while keeping Music audible.
+                self.media_player.set_mute_dubbed(
+                    False if self._music_audio_tracks() else a2_muted
+                )
             except Exception:
                 pass
         if hasattr(self, "track_label_bar"):
             self.track_label_bar.set_muted("A1 Audio", a1_muted)
             self.track_label_bar.set_muted("TS1", a2_muted)
+            self.track_label_bar.set_muted("A2 Music", music_muted)
 
     def _is_active_timeline_audio_track_muted(self) -> bool:
         track_mutes = self._timeline_audio_track_mutes()
@@ -8301,7 +8768,9 @@ class VideoTranslatorGUI(QMainWindow):
         if dubbed_audio_kind == "voice":
             return a2_muted
         if dubbed_audio_kind == "mixed":
-            return a1_muted and a2_muted
+            # The mixed sidecar contains TTS + Music. A1 is loaded as its
+            # own sidecar, so only the TTS-side mute controls this stream.
+            return a2_muted
         return a1_muted
 
     def on_add_timeline_layer(self, layer_type: str = "subtitle"):
@@ -9623,6 +10092,24 @@ class VideoTranslatorGUI(QMainWindow):
                         # refresh it after deletion so only the selected
                         # layer is removed and surviving text stays visible.
                         self._refresh_text_layer_preview("")
+                    if layer_type == "audio" and str(getattr(track, "name", "")) == "A2 Music":
+                        # Removing a Music Layer must also remove it from the
+                        # composed preview sidecar.  Do not leave the hidden
+                        # legacy path/artifact as a fallback after the last
+                        # music layer has been deleted.
+                        if not track.layers:
+                            try:
+                                self.bg_music_edit.clear()
+                            except Exception:
+                                pass
+                            self.last_music_path = ""
+                            self.processed_artifacts.pop("music", None)
+                            state = getattr(self, "current_project_state", None)
+                            if state is not None:
+                                state.artifacts.pop("music", None)
+                                self.project_service.save_project(state)
+                        self._refresh_music_layer_summary()
+                        self._schedule_preview_audio_refresh(force=True)
                     try:
                         self.persist_current_timeline_project_data()
                     except Exception:
@@ -10233,7 +10720,7 @@ class VideoTranslatorGUI(QMainWindow):
                 speed_row.setSpacing(8)
                 speed_label = QLabel("Voice Speed:")
                 speed_label.setObjectName("helperLabel")
-                speed_spin = QDoubleSpinBox()
+                speed_spin = ReliableDoubleSpinBox()
                 speed_spin.setRange(0.5, 3.0)
                 speed_spin.setSingleStep(0.1)
                 speed_spin.setDecimals(1)
@@ -12529,6 +13016,11 @@ class VideoTranslatorGUI(QMainWindow):
 
     def refresh_ui_state(self):
         """Basic enable/disable rules to guide user flow."""
+        # Legacy Audio Source controls are kept only for compatibility with
+        # older project/settings data.  Re-assert their hidden state on every
+        # UI refresh so playback, project loading, or mode changes cannot
+        # accidentally make the obsolete radio buttons appear.
+        self._hide_legacy_audio_source_controls()
         review_mode = self._preview_is_playing()
         v_ok = bool(self.video_path_edit.text().strip()) and os.path.exists(self.video_path_edit.text().strip())
         a_ok = bool(self.audio_source_edit.text().strip()) and os.path.exists(self.audio_source_edit.text().strip())
@@ -12625,6 +13117,12 @@ class VideoTranslatorGUI(QMainWindow):
             self.stop_btn.setEnabled(v_ok and not voice_running)
         if hasattr(self, "blur_area_btn"):
             self.blur_area_btn.setEnabled(can_export and not review_mode)
+        if hasattr(self, "add_music_layer_btn"):
+            # Music is an audio track, not a visual overlay; it can be added
+            # as soon as a source video is selected, but never while Review
+            # Mode is active or a voice/render worker is running.
+            source_video = self._resolve_preview_original_video_path()
+            self.add_music_layer_btn.setEnabled(bool(source_video) and not review_mode and not voice_running)
         # Overlay tracks are only meaningful once the generated output is
         # ready. Keep their controls disabled before that point so users
         # cannot create layers against an incomplete video workflow.
@@ -13930,7 +14428,11 @@ class VideoTranslatorGUI(QMainWindow):
             cached_voice_signature = str(state.settings.get("voice_signature", "") or "").strip()
             cached_voice_track = self._normalize_local_file_path(state.artifacts.get("voice_vi", "") or self.last_voice_vi_path)
             cached_mixed_track = self._normalize_local_file_path(state.artifacts.get("mixed_vi", "") or self.last_mixed_vi_path)
-            required_output = cached_mixed_track if bg_path else cached_voice_track
+            # TTS generation caches the standalone voice track.  Music and
+            # volume are composed later for preview/export, so a Music Layer
+            # must not force a second TTS synthesis just because no legacy
+            # mixed_vi artifact exists.
+            required_output = cached_voice_track
             self.log(
                 f"[Voiceover] Cache check: force={force_refresh}, "
                 f"cached_sig={'<empty>' if not cached_voice_signature else cached_voice_signature[:16]+'...'}, "
@@ -13946,12 +14448,7 @@ class VideoTranslatorGUI(QMainWindow):
                     self.update_project_artifact("voice_vi", self.last_voice_vi_path)
                     self.update_project_step("generate_tts", "done")
                 if bg_path:
-                    if self.last_mixed_vi_path:
-                        self.processed_artifacts["mixed_vi"] = self.last_mixed_vi_path
-                        self.update_project_artifact("mixed_vi", self.last_mixed_vi_path)
-                        self.update_project_step("mix_audio", "done")
-                    else:
-                        self.update_project_step("mix_audio", "skipped")
+                    self.update_project_step("mix_audio", "skipped")
                 self.log("[Voiceover] Reusing existing generated audio. Generate did not call TTS again.")
                 self.progress_bar.setValue(100)
                 self.schedule_timeline_visual_refresh(waveform=True, thumbnails=False)
@@ -14164,7 +14661,7 @@ class VideoTranslatorGUI(QMainWindow):
             self.processed_artifacts["mixed_vi"] = mixed
             self.update_project_artifact("mixed_vi", mixed)
             self.update_project_step("mix_audio", "done")
-        elif self.bg_music_edit.text().strip():
+        elif self._music_audio_tracks():
             self.update_project_step("mix_audio", "skipped")
         if self._apply_generated_tts_texts(voice_segments):
             self._single_line_split_cache = None
@@ -14179,6 +14676,7 @@ class VideoTranslatorGUI(QMainWindow):
                 if hasattr(self, "voice_timing_sync_combo"):
                     self.timeline.set_voice_sync_mode(self.voice_timing_sync_combo.currentText())
             self._sync_timeline_mute_to_gui()
+            self._sync_audio_mix_controls_from_tracks()
             self.persist_current_timeline_project_data()
             # Regenerate the project SRT from the updated segments so it
             # reflects the actual TTS audio duration (e.g. when a segment

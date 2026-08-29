@@ -391,9 +391,11 @@ class MpvMediaPlayerBackend(QObject):
 
     - mpv plays the source video with NO audio (`ao=null`) — video only
     - QMediaPlayer sidecar #1 plays the original audio file (extracted_audio)
-    - QMediaPlayer sidecar #2 plays the dubbed audio file (mixed_vi)
+    - QMediaPlayer sidecar #2 plays the generated TTS + Music Layer mix
 
-    Each audio has its own QAudioOutput with its own mute. A sync timer
+    A1 and the combined TTS/music sidecar remain separate so the Original
+    and TTS controls stay independent; Music is mixed into the dubbed sidecar
+    with its own track volume before playback. A sync timer
     keeps all three playheads aligned.
 
     The mpv Python bindings in this build reject `audio-add`, `lavfi=*`

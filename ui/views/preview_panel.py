@@ -8,7 +8,6 @@ from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -25,6 +24,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from widgets.spin_boxes import ReliableDoubleSpinBox
 
 from runtime_paths import asset_path
 from widgets import MpvVideoView, VideoView
@@ -1359,7 +1359,7 @@ def build_preview_panel(gui):
     fade_in_label = QLabel("Fade In")
     fade_in_label.setMinimumWidth(50)
     fade_row.addWidget(fade_in_label)
-    gui.audio_inspector_fade_in_spin = QDoubleSpinBox()
+    gui.audio_inspector_fade_in_spin = ReliableDoubleSpinBox()
     gui.audio_inspector_fade_in_spin.setRange(0.0, 30.0)
     gui.audio_inspector_fade_in_spin.setSingleStep(0.1)
     gui.audio_inspector_fade_in_spin.setValue(0.0)
@@ -1369,7 +1369,7 @@ def build_preview_panel(gui):
     fade_out_label = QLabel("Fade Out")
     fade_out_label.setMinimumWidth(60)
     fade_row.addWidget(fade_out_label)
-    gui.audio_inspector_fade_out_spin = QDoubleSpinBox()
+    gui.audio_inspector_fade_out_spin = ReliableDoubleSpinBox()
     gui.audio_inspector_fade_out_spin.setRange(0.0, 30.0)
     gui.audio_inspector_fade_out_spin.setSingleStep(0.1)
     gui.audio_inspector_fade_out_spin.setValue(0.0)
@@ -1404,7 +1404,7 @@ def build_preview_panel(gui):
         timing_row = QHBoxLayout()
         timing_row.setSpacing(6)
         timing_row.addWidget(QLabel("Start"))
-        start_spin = QDoubleSpinBox()
+        start_spin = ReliableDoubleSpinBox()
         start_spin.setRange(0.0, 86400.0)
         start_spin.setDecimals(2)
         start_spin.setSingleStep(0.1)
@@ -1413,7 +1413,7 @@ def build_preview_panel(gui):
         setattr(gui, f"{prefix}_inspector_start_spin", start_spin)
         timing_row.addWidget(start_spin, 1)
         timing_row.addWidget(QLabel("End"))
-        end_spin = QDoubleSpinBox()
+        end_spin = ReliableDoubleSpinBox()
         end_spin.setRange(0.1, 86400.0)
         end_spin.setDecimals(2)
         end_spin.setSingleStep(0.1)
