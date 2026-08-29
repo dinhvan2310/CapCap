@@ -76,6 +76,45 @@ def ffprobe_binary_path() -> str:
     return bin_path("ffmpeg", "ffprobe.exe")
 
 
+_SUBTITLE_FONT_CACHE: dict[str, str] = {}
+
+
+def resolve_subtitle_font_name(requested: str) -> str:
+    """Return a font family available to libass on the current platform."""
+    name = str(requested or "Arial").strip() or "Arial"
+    if os.name == "nt":
+        return name
+    cached = _SUBTITLE_FONT_CACHE.get(name.casefold())
+    if cached:
+        return cached
+    try:
+        families_result = subprocess.run(
+            ["fc-list", ":", "family"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+        available = {
+            family.strip().casefold()
+            for line in families_result.stdout.splitlines()
+            for family in line.split(",")
+            if family.strip()
+        }
+    except (OSError, subprocess.SubprocessError):
+        available = set()
+    if name.casefold() in available:
+        resolved = name
+    else:
+        resolved = next(
+            (candidate for candidate in ("Roboto", "Noto Sans", "DejaVu Sans") if candidate.casefold() in available),
+            "DejaVu Sans",
+        )
+    _SUBTITLE_FONT_CACHE[name.casefold()] = resolved
+    return resolved
+
+
 def models_path(*parts: str) -> str:
     writable = join_root("models", *parts)
     bundled = os.path.join(bundle_root(), "models", *parts)

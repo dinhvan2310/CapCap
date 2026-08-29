@@ -3,6 +3,7 @@ import time
 import re
 
 from services import EngineRuntime, ProjectService
+from runtime_paths import resolve_subtitle_font_name
 
 
 class ExportWorkflow:
@@ -38,6 +39,7 @@ class ExportWorkflow:
         style.setdefault("alignment", 2)
         style.setdefault("margin_v", 30)
         style.setdefault("font_name", "Arial")
+        style["font_name"] = resolve_subtitle_font_name(style.get("font_name", "Arial"))
         style.setdefault("font_size", 18)
         style.setdefault("font_color", "&H00FFFFFF")
         style.setdefault("background_box", False)

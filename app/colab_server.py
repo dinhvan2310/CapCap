@@ -245,6 +245,115 @@ class Job:
         }
 
 
+def _hex_to_ass_color(value: Any, fallback: str = "&H00FFFFFF") -> str:
+    raw = str(value or "").strip().lstrip("#")
+    if len(raw) != 6 or any(char not in "0123456789abcdefABCDEF" for char in raw):
+        return fallback
+    return f"&H00{raw[4:6]}{raw[2:4]}{raw[0:2]}"
+
+
+def _default_render_config() -> dict[str, Any]:
+    return {
+        "subtitle_style": {
+            "font_name": "Roboto",
+            "font_size": 30,
+            "font_color": "&H00FFFFFF",
+            "highlight_color": "&H00FFFFFF",
+            "outline_color": "&H00000000",
+            "outline_width": 3,
+            "shadow_color": "&H00000000",
+            "shadow_depth": 1,
+            "background_color": "&H00000000",
+            "background_alpha": 1.0,
+            "background_box": True,
+            "background_width": "fit_text",
+            "background_shape": "rectangle",
+            "background_padding": 6,
+            "background_radius": 0,
+            "animation": "Fade In",
+            "animation_duration": 0.22,
+            "bold": False,
+            "alignment": 2,
+            "margin_v": 30,
+            "custom_position_enabled": False,
+            "custom_position_x": 50,
+            "custom_position_y": 86,
+            "single_line": False,
+            "font_scale": 1.0,
+            "auto_keyword_highlight": False,
+            "manual_highlights": [],
+            "word_timings": [],
+            "speaker_colors": [],
+            "karaoke_timing_mode": "vietnamese",
+        },
+        "output_quality": "source",
+        "output_fps": "source",
+        "output_ratio": "source",
+        "output_scale_mode": "fit",
+        "output_fill_focus_x": 0.5,
+        "output_fill_focus_y": 0.5,
+        "video_filter_state": {},
+    }
+
+
+def _render_config_from_state(state: dict[str, Any]) -> dict[str, Any]:
+    config = _default_render_config()
+    settings = dict(state.get("settings") or {})
+    saved_config = settings.get("render_config") or {}
+    if isinstance(saved_config, dict):
+        for key, value in saved_config.items():
+            if key == "subtitle_style" and isinstance(value, dict):
+                config["subtitle_style"].update(value)
+            elif key in config:
+                config[key] = value
+
+    saved_style = settings.get("subtitle_style") or {}
+    if isinstance(saved_style, dict):
+        config["subtitle_style"].update(saved_style)
+
+    controls = settings.get("subtitle_style_controls") or {}
+    if isinstance(controls, dict):
+        style = config["subtitle_style"]
+        direct_map = {
+            "font": "font_name",
+            "size": "font_size",
+            "animation": "animation",
+            "animation_time": "animation_duration",
+            "background": "background_box",
+            "background_color": "background_color",
+            "background_alpha": "background_alpha",
+            "background_width": "background_width",
+            "background_shape": "background_shape",
+            "background_padding": "background_padding",
+            "background_radius": "background_radius",
+            "bold": "bold",
+            "auto_keyword_highlight": "auto_keyword_highlight",
+            "karaoke_timing_mode": "karaoke_timing_mode",
+            "single_line": "single_line",
+        }
+        for source_key, target_key in direct_map.items():
+            if source_key in controls:
+                style[target_key] = controls[source_key]
+        if "color" in controls:
+            style["font_color"] = _hex_to_ass_color(controls["color"])
+        if "background_color" in controls:
+            style["background_color"] = _hex_to_ass_color(controls["background_color"], style.get("background_color", "&H00000000"))
+        if "highlight_color" in controls:
+            style["highlight_color"] = _hex_to_ass_color(controls["highlight_color"])
+        if "outline" in controls:
+            style["outline_width"] = 3 if bool(controls["outline"]) else 0
+        position = controls.get("position")
+        if isinstance(position, dict):
+            for key in ("alignment", "margin_v", "custom_position_enabled", "custom_position_x", "custom_position_y"):
+                if key in position:
+                    style[key] = position[key]
+
+    for key in ("output_quality", "output_fps", "output_ratio", "output_scale_mode", "output_fill_focus_x", "output_fill_focus_y", "video_filter_state"):
+        if key in settings:
+            config[key] = settings[key]
+    return config
+
+
 class JobManager:
     def __init__(self, storage: ColabStorage):
         self.storage = storage
@@ -391,6 +500,11 @@ class JobManager:
                 self._emit(job, "Exporting video", progress=92)
                 output_path = str(job.payload.get("output_path") or Path(project_root) / "export" / f"{job.project_id}.mp4")
                 artifacts = dict(state.get("artifacts", {}) or {})
+                render_config = _render_config_from_state(state)
+                payload_style = job.payload.get("subtitle_style")
+                subtitle_style = dict(render_config["subtitle_style"])
+                if isinstance(payload_style, dict):
+                    subtitle_style.update(payload_style)
                 runtime.run_export(
                     video_path=input_video,
                     output_path=output_path,
@@ -398,11 +512,14 @@ class JobManager:
                     srt_path=str(job.payload.get("srt_path", artifacts.get("subtitle_translated_srt", "")) or ""),
                     ass_path=str(job.payload.get("ass_path", "") or ""),
                     audio_path=str(job.payload.get("audio_path", artifacts.get("mixed_audio", artifacts.get("voice_track", artifacts.get("voice_vi", "")))) or ""),
-                    subtitle_style=dict(job.payload.get("subtitle_style", {}) or {}),
-                    output_quality=str(job.payload.get("output_quality", "source") or "source"),
-                    output_fps=str(job.payload.get("output_fps", "source") or "source"),
-                    output_ratio=str(job.payload.get("output_ratio", "source") or "source"),
-                    output_scale_mode=str(job.payload.get("output_scale_mode", "fit") or "fit"),
+                    subtitle_style=subtitle_style,
+                    output_quality=str(job.payload.get("output_quality", render_config["output_quality"]) or "source"),
+                    output_fps=str(job.payload.get("output_fps", render_config["output_fps"]) or "source"),
+                    output_ratio=str(job.payload.get("output_ratio", render_config["output_ratio"]) or "source"),
+                    output_scale_mode=str(job.payload.get("output_scale_mode", render_config["output_scale_mode"]) or "fit"),
+                    output_fill_focus_x=float(job.payload.get("output_fill_focus_x", render_config["output_fill_focus_x"]) or 0.5),
+                    output_fill_focus_y=float(job.payload.get("output_fill_focus_y", render_config["output_fill_focus_y"]) or 0.5),
+                    video_filter_state=dict(job.payload.get("video_filter_state", render_config["video_filter_state"]) or {}),
                     project_state_path=str(Path(project_root) / "project.json"),
                     project_temp_dir=str(Path(project_root) / "preview" / "cache"),
                     on_progress=self._callback(job, "export"),
