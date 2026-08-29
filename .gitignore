@@ -8,6 +8,9 @@ __pycache__/
 # Virtual environments
 .venv/
 venv/
+node_modules/
+**/node_modules/
+*.tsbuildinfo
 
 # Local environment config
 .env
@@ -33,6 +36,8 @@ Thumbs.db
 
 bin/
 dist/
+!frontend/dist/
+!frontend/dist/**
 build/
 voice_temp/
 *.gguf

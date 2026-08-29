@@ -1,0 +1,25 @@
+:root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #e6edf3; background: #0d1117; font-synthesis: none; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 1100px; background: #0d1117; }
+button, input, select, textarea { font: inherit; }
+button { border: 1px solid #30363d; color: #e6edf3; background: #161b22; border-radius: 7px; padding: 9px 13px; cursor: pointer; }
+button:hover:not(:disabled) { border-color: #8b949e; background: #21262d; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.primary { background: #238636; border-color: #2ea043; }
+button.danger { color: #ff7b72; }
+input, select, textarea { width: 100%; color: #e6edf3; background: #0d1117; border: 1px solid #30363d; border-radius: 7px; padding: 10px 11px; outline: none; }
+textarea { min-height: 120px; resize: vertical; margin-top: 18px; }
+.app-shell { min-height: 100vh; }
+.topbar { height: 78px; display: flex; align-items: center; justify-content: space-between; padding: 0 28px; border-bottom: 1px solid #21262d; background: #161b22; }
+h1, h2, p { margin: 0; } h1 { font-size: 20px; letter-spacing: -.02em; } h2 { font-size: 17px; }
+.eyebrow { display: block; color: #8b949e; font-size: 10px; letter-spacing: .13em; font-weight: 700; margin-bottom: 5px; }
+.status { border: 1px solid #30363d; padding: 5px 9px; border-radius: 999px; color: #8b949e; font-size: 11px; text-transform: uppercase; }
+.status-completed, .status-ready { color: #3fb950; border-color: #238636; }.status-running { color: #d29922; border-color: #9e6a03; }.status-failed, .status-cancelled, .status-offline { color: #ff7b72; border-color: #da3633; }
+.workspace { padding: 24px 28px 36px; display: grid; gap: 16px; }
+.panel { border: 1px solid #30363d; border-radius: 9px; background: #161b22; }
+.connect-panel { max-width: 640px; margin: 12vh auto; padding: 28px; display: grid; gap: 24px; }.connect-panel p, .toolbar p { color: #8b949e; font-size: 13px; margin-top: 6px; }.connect-row { display: flex; gap: 9px; }.connect-row button { min-width: 110px; }
+.toolbar { padding: 18px 20px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }.actions { display: flex; gap: 8px; align-items: center; }.actions select { width: 125px; }
+.progress-track { height: 4px; overflow: hidden; background: #21262d; border-radius: 2px; }.progress-track span { display: block; height: 100%; background: #2f81f7; transition: width .2s ease; }
+.editor-grid { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(300px, .75fr); gap: 16px; }.preview, .inspector, .timeline, .logs { min-height: 280px; padding: 16px; }.panel-heading { display: flex; justify-content: space-between; align-items: center; font-size: 13px; font-weight: 700; }.muted { color: #8b949e; font-weight: 400; font-size: 12px; }.preview-empty { min-height: 220px; margin-top: 14px; display: grid; place-items: center; color: #8b949e; border: 1px dashed #30363d; border-radius: 7px; font-size: 13px; }.source-video { width: 100%; max-height: 420px; margin-top: 14px; background: #0d1117; border-radius: 7px; }.stat { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid #21262d; padding: 13px 0; color: #8b949e; font-size: 12px; }.stat strong, .stat code { color: #e6edf3; font-size: 12px; }
+.bottom-grid { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(300px, .75fr); gap: 16px; }.timeline { min-height: 190px; }.timeline-ruler { display: flex; justify-content: space-between; margin: 30px 50px 10px; color: #8b949e; font-size: 10px; }.track { height: 43px; display: flex; align-items: center; gap: 10px; border-top: 1px solid #21262d; }.track-label { width: 76px; color: #8b949e; font-size: 10px; }.clip { padding: 8px 12px; width: 44%; border-left: 3px solid #2f81f7; background: #1f2a3a; border-radius: 4px; font-size: 11px; }.muted-clip { border-left-color: #8b949e; background: #21262d; }.logs { min-height: 190px; }.log-list { margin-top: 16px; max-height: 140px; overflow: auto; display: grid; gap: 8px; color: #8b949e; font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; }
+.segment-list { margin-top: 12px; max-height: 250px; overflow: auto; display: grid; gap: 7px; }.segment-list label { display: grid; grid-template-columns: 125px 1fr; align-items: center; gap: 8px; color: #8b949e; font-size: 10px; }.segment-list input { padding: 7px 8px; font-size: 11px; }

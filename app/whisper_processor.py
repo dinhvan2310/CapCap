@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -197,14 +198,49 @@ def _detect_faster_whisper_runtime() -> dict:
         import ctranslate2
 
         if ctranslate2.get_cuda_device_count() > 0:
+            compute_type = _whisper_gpu_compute_type()
             runtime = {
                 "device": "cuda",
-                "compute_type": "int8_float16",
-                "label": "CUDA / int8_float16",
+                "compute_type": compute_type,
+                "label": f"CUDA / {compute_type}",
             }
     except Exception:
         pass
     return runtime
+
+
+def _whisper_gpu_compute_type() -> str:
+    """Select a compute type that is supported by the installed GPU/runtime.
+
+    INT8 Tensor Core GEMMs used by CTranslate2 can return
+    CUBLAS_STATUS_NOT_SUPPORTED on Blackwell (RTX 50-series) GPUs, even when
+    the device reports that the INT8 compute type is available.  FP16 is
+    supported on these GPUs and is still substantially faster than CPU mode.
+    Keep an override for users with a newer/older runtime combination.
+    """
+    override = str(os.environ.get("CAPCAP_WHISPER_COMPUTE_TYPE", "auto") or "auto").strip().lower()
+    allowed = {"float16", "float32", "int8_float16", "int8_float32", "int8", "auto"}
+    if override in allowed and override != "auto":
+        return override
+
+    if _is_blackwell_gpu():
+        return "float16"
+    return "int8_float16"
+
+
+def _is_blackwell_gpu() -> bool:
+    """Return whether the first visible NVIDIA GPU is an RTX 50/Blackwell GPU."""
+    try:
+        output = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            **subprocess_text_kwargs(),
+        )
+        name = str(output).splitlines()[0].strip().lower()
+        return "blackwell" in name or bool(re.search(r"\brtx\s*50\d{2}\b", name))
+    except Exception:
+        return False
 
 
 def _download_whisper_from_custom_repo(model_name: str) -> str | None:

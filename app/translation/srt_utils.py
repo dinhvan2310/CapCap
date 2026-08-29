@@ -113,7 +113,10 @@ def parse_numbered_line_items(raw: str) -> list[tuple[int, str]]:
             stripped = raw_line.strip()
             if not stripped:
                 continue
-            if stripped.startswith(("Assistant:", "Translation:", "Trợ lý:", "Dịch:", "Note:", "Here", "Sure", "OK", "Let", "I'll", "The")):
+            # Only discard standalone wrapper labels.  Natural subtitle text
+            # can legitimately start with words such as "The", "Here", or
+            # "Let", so broad prefix filtering silently drops valid cues.
+            if re.fullmatch(r"(?:Assistant|Translation|Trợ lý|Dịch|Note)\s*: ?", stripped, flags=re.IGNORECASE):
                 continue
             body_lines.append(stripped)
         normalized = " ".join(body_lines).strip()
@@ -136,7 +139,7 @@ def parse_numbered_line_items(raw: str) -> list[tuple[int, str]]:
         stripped = line.strip()
         if not stripped:
             continue
-        if stripped.startswith(("Assistant:", "Translation:", "Trợ lý:", "Dịch:", "Note:", "Here", "Sure", "OK", "Let", "I'll", "The")):
+        if re.fullmatch(r"(?:Assistant|Translation|Trợ lý|Dịch|Note)\s*: ?", stripped, flags=re.IGNORECASE):
             continue
         match = re.match(r"^\s*\d+\.\s*(.+?)\s*$", line)
         if match:

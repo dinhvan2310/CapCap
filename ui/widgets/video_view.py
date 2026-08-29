@@ -34,6 +34,14 @@ class VideoView(QGraphicsView):
         self.preview_scale_mode = "fit"
         self.preview_fill_focus_x = 0.5
         self.preview_fill_focus_y = 0.5
+        # The Qt Multimedia fallback does not provide MPV's native overlay
+        # widgets.  Keep the state needed by the shared main-window code so
+        # switching to this backend remains safe and predictable.
+        self._blur_regions = []
+        self._blur_active_index = 0
+        self._subtitle_track_visible = True
+        self.subtitle_render_width = 0
+        self.subtitle_render_height = 0
         self._framing_drag_active = False
         self._framing_drag_start = QPointF()
         self._framing_drag_focus = (0.5, 0.5)
@@ -86,6 +94,72 @@ class VideoView(QGraphicsView):
 
     def get_preview_fill_focus(self) -> tuple[float, float]:
         return (float(self.preview_fill_focus_x), float(self.preview_fill_focus_y))
+
+    def set_blur_edit_enabled(self, enabled: bool):
+        """Keep the non-MPV fallback compatible with the main window.
+
+        Blur editing is implemented by the MPV overlay view.  The Qt
+        Multimedia fallback does not have an equivalent overlay, but the
+        main window still synchronizes this capability while refreshing its
+        controls.  Exposing a no-op here prevents the fallback backend from
+        crashing during startup or when preview tools are temporarily hidden.
+        """
+        return None
+
+    def set_blur_regions_normalized(self, regions):
+        """Store blur data for compatibility; the fallback cannot render it."""
+        self._blur_regions = list(regions or [])
+
+    def get_blur_region_normalized(self):
+        return list(self._blur_regions)
+
+    def set_blur_active_index(self, index: int):
+        try:
+            self._blur_active_index = max(0, int(index))
+        except (TypeError, ValueError):
+            self._blur_active_index = 0
+
+    def add_blur_region(self):
+        """No-op for the Qt Multimedia backend (blur editing is MPV-only)."""
+        return None
+
+    def clear_blur_region(self):
+        self._blur_regions = []
+
+    def set_subtitle_track_visible(self, visible: bool):
+        self._subtitle_track_visible = bool(visible)
+        self.subtitle_item.setVisible(self._subtitle_track_visible)
+
+    def set_subtitle_render_dimensions(self, width: int, height: int):
+        self.subtitle_render_width = max(0, int(width or 0))
+        self.subtitle_render_height = max(0, int(height or 0))
+
+    # These methods are intentionally harmless compatibility hooks.  The
+    # fallback can show video and subtitle overlays, while MPV is required
+    # for interactive blur/mask/logo/text overlays and their filters.
+    def set_mask_regions(self, regions, *, active_index: int = 0, editable: bool = True):
+        return None
+
+    def clear_mask_region(self):
+        return None
+
+    def set_logos(self, logos, *, active_index: int = 0, editable: bool = True):
+        return None
+
+    def clear_logo(self):
+        return None
+
+    def set_logo_opacity(self, opacity: float):
+        return None
+
+    def set_logo_rotation(self, rotation: float):
+        return None
+
+    def set_logo_track_visible(self, visible: bool):
+        return None
+
+    def set_text_layers(self, layers, active_id=""):
+        return None
 
     def _resolve_canvas_aspect_ratio(self) -> float | None:
         aspect_key = str(getattr(self, "preview_aspect_key", "source") or "source").strip().lower()

@@ -2,4 +2,5 @@ PySide6
 requests
 python-dotenv
 pydub
+audioop-lts; python_version >= "3.13"
 python-mpv

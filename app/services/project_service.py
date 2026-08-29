@@ -140,6 +140,12 @@ class ProjectService:
             os.makedirs(os.path.join(project_root, relative_dir), exist_ok=True)
 
     def _build_project_id(self, video_path: str) -> str:
+        # Colab's file-ID layer assigns a content fingerprint project ID
+        # before the workflow starts.  Let the workflow reuse that exact
+        # workspace instead of deriving a second ID from the ephemeral path.
+        forced_project_id = str(os.getenv("CAPCAP_PROJECT_ID", "") or "").strip()
+        if forced_project_id and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}", forced_project_id):
+            return forced_project_id
         video_name = os.path.splitext(os.path.basename(video_path))[0] or "project"
         slug = re.sub(r"[^a-zA-Z0-9]+", "_", video_name).strip("_").lower() or "project"
         digest = hashlib.sha1(os.path.abspath(video_path).encode("utf-8")).hexdigest()[:8]
