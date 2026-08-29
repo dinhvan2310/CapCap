@@ -101,8 +101,8 @@ def open_resource_manager(workspace_root: str = None, parent=None,
 
     hint = QLabel(
         "Each resource shows its target folder and download link. "
-        "Download the file yourself and drop it into the target folder. "
-        "Use 'Refresh' to re-check status.",
+        "Use 'Download' for supported resources or download the file yourself "
+        "and drop it into the target folder. Use 'Refresh' to re-check status.",
         dialog,
     )
     hint.setObjectName("resourceHint")
@@ -122,6 +122,9 @@ def open_resource_manager(workspace_root: str = None, parent=None,
     scroll.setWidget(content)
 
     dialog._resource_rows = {}
+    download_worker = [None]
+    active_resource_id = [""]
+    download_state = {"running": False}
 
     def _show_status_pill(row, status_key: str, status_label: str = ""):
         new_pill = _status_pill_widget(status_key, dialog, status_label)
@@ -129,6 +132,84 @@ def open_resource_manager(workspace_root: str = None, parent=None,
         row["status_pill"].deleteLater()
         row["status_pill"] = new_pill
         row["status_pill"].show()
+
+    def _set_download_button(row, *, active: bool = False, message: str = ""):
+        button = row.get("download_btn") if row else None
+        if button is None:
+            return
+        if active:
+            button.setEnabled(False)
+            button.setText(str(message or "Downloading..."))
+        else:
+            button.setEnabled(bool(row.get("download_supported", False)))
+            button.setText(str(row.get("download_label", "Download")))
+
+    def _on_download_progress(percent: int, message: str):
+        resource_id = active_resource_id[0]
+        row = dialog._resource_rows.get(resource_id)
+        if row is None:
+            return
+        try:
+            value = int(percent)
+        except (TypeError, ValueError):
+            value = -1
+        if value >= 0:
+            _set_download_button(row, active=True, message=f"Downloading... {max(0, min(100, value))}%")
+        else:
+            _set_download_button(row, active=True, message="Downloading...")
+
+    def _on_download_finished(resource_id: str, error: str):
+        download_worker[0] = None
+        download_state["running"] = False
+        active_resource_id[0] = ""
+        row = dialog._resource_rows.get(resource_id)
+        if row is not None:
+            _set_download_button(row, active=False)
+        if error:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                dialog,
+                "Resource Download Failed",
+                f"Could not download {resource_id}.\n\n{error}",
+            )
+            return
+        _refresh()
+        if on_finished:
+            try:
+                on_finished()
+            except Exception:
+                pass
+
+    def _start_download(resource_id: str):
+        rid = str(resource_id or "").strip()
+        if not rid:
+            return
+        if download_state["running"]:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                dialog,
+                "Download in Progress",
+                "Another resource is already downloading. Please wait for it to finish.",
+            )
+            return
+        row = dialog._resource_rows.get(rid)
+        if row is None or not row.get("download_supported", False):
+            return
+        try:
+            from worker_adapters.processing_workers import ResourceDownloadWorker
+        except Exception as exc:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(dialog, "Resource Download", f"Download worker is unavailable:\n\n{exc}")
+            return
+
+        download_state["running"] = True
+        active_resource_id[0] = rid
+        _set_download_button(row, active=True)
+        worker = ResourceDownloadWorker(workspace_root, rid)
+        worker.progress.connect(_on_download_progress)
+        worker.finished.connect(_on_download_finished)
+        download_worker[0] = worker
+        worker.start()
 
     def _add_card(item, target_layout):
         card = QFrame(dialog)
@@ -212,6 +293,35 @@ def open_resource_manager(workspace_root: str = None, parent=None,
         )
         button_row.addWidget(download_btn)
 
+        resource_id = str(item.get("id", "") or "").strip()
+        # Every resource with a service-side download handler gets a one-click
+        # action.  The existing Open Download Page action remains available as
+        # a manual/alternative path.
+        download_supported = bool(
+            item.get("auto_download_supported", False)
+            and service.supports_auto_download(resource_id)
+        )
+        resource_download_btn = None
+        download_label = {
+            "whisper:base": "Download Whisper",
+            "whisper:small": "Download Whisper",
+            "whisper:medium": "Download Whisper",
+            "cuda:whisper": "Download GPU Pack",
+            "sensevoice:model": "Download SenseVoice",
+            "ocr:engine": "Download Rapid OCR",
+            "diarization:segmentation": "Download Speaker Model",
+            "diarization:embedding": "Download Speaker Model",
+            "voice:pack": "Download Voices",
+            "voice:pack-en": "Download Voices",
+        }.get(resource_id, "Download")
+        if download_supported:
+            resource_download_btn = QPushButton(download_label, dialog)
+            resource_download_btn.setToolTip("Download this resource into the target folder")
+            resource_download_btn.clicked.connect(
+                lambda _checked=False, rid=item["id"]: _start_download(rid)
+            )
+            button_row.addWidget(resource_download_btn)
+
         open_folder_btn = QPushButton("Open Storage Folder", dialog)
         open_folder_btn.setEnabled(bool(target_dir))
         open_folder_btn.clicked.connect(
@@ -227,6 +337,9 @@ def open_resource_manager(workspace_root: str = None, parent=None,
             "name_label": name_label,
             "status_pill": status_pill,
             "header_row": header_row,
+            "download_btn": resource_download_btn,
+            "download_supported": download_supported,
+            "download_label": download_label,
         }
 
     def _make_section(title_text, expanded):
@@ -269,6 +382,12 @@ def open_resource_manager(workspace_root: str = None, parent=None,
             row["item"] = item
             status = str(item.get("status", "missing")).strip().lower()
             _show_status_pill(row, status, str(item.get("status_label", "") or ""))
+            row["download_supported"] = bool(
+                service.supports_auto_download(resource_id)
+                and item.get("auto_download_supported", False)
+            )
+            is_active = bool(download_state["running"] and resource_id == active_resource_id[0])
+            _set_download_button(row, active=is_active)
 
     def _populate():
         for i in reversed(range(content_layout.count())):
@@ -279,9 +398,10 @@ def open_resource_manager(workspace_root: str = None, parent=None,
         dialog._resource_rows = {}
 
         resources = service.list_resources()
-        cpu_items = [r for r in resources if r.get("kind") in {"sensevoice", "whisper_cpu"}]
+        cpu_items = [r for r in resources if r.get("kind") in {"sensevoice", "whisper_cpu", "ocr"}]
         gpu_kinds = {"ai", "whisper", "cuda"}
         gpu_items = [r for r in resources if r.get("kind") in gpu_kinds]
+        speaker_items = [r for r in resources if r.get("kind") == "diarization"]
         voice_items = [r for r in resources if r.get("kind") == "voice"]
 
         if cpu_items:
@@ -296,10 +416,19 @@ def open_resource_manager(workspace_root: str = None, parent=None,
             # Previously this header was conditionally removed based on the
             # process environment, which made "GPU Resource" appear to vanish
             # after launcher/device-state refreshes.
-            gpu_card, gpu_layout = _make_section("GPU Resource", expanded=False)
+            # Keep GPU resources expanded by default so the GPU Acceleration
+            # Pack is immediately discoverable, even when the launcher starts
+            # in CPU mode.  Users can still collapse the section manually.
+            gpu_card, gpu_layout = _make_section("GPU Resource", expanded=True)
             for item in gpu_items:
                 _add_card(item, gpu_layout)
             content_layout.addWidget(gpu_card)
+
+        if speaker_items:
+            speaker_card, speaker_layout = _make_section("Speaker Detection Resources", expanded=False)
+            for item in speaker_items:
+                _add_card(item, speaker_layout)
+            content_layout.addWidget(speaker_card)
 
         for item in voice_items:
             _add_card(item, content_layout)
@@ -329,6 +458,19 @@ def open_resource_manager(workspace_root: str = None, parent=None,
     layout.addLayout(footer_row)
 
     def _on_dialog_closed():
+        worker = download_worker[0]
+        if worker is not None and worker.isRunning():
+            # ResourceDownloadWorker performs blocking network/file work, so
+            # let it finish briefly before the dialog is destroyed.  This
+            # prevents QThread warnings when a user closes Manage Resources
+            # during a download.
+            worker.quit()
+            worker.wait(3000)
+            if worker.isRunning():
+                worker.terminate()
+                worker.wait(1000)
+            download_worker[0] = None
+            download_state["running"] = False
         if on_finished:
             try:
                 on_finished()

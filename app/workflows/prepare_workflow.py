@@ -950,6 +950,11 @@ class PrepareWorkflow:
                         voice_name=prefetch_voice_name,
                         voice_speed=float(prefetch_voice_speed or 1.0),
                         index_offset=int(start_idx),
+                        normalizer_dictionary=dict(
+                            (getattr(project_state, "settings", {}) or {}).get(
+                                "normalizer_dictionary", {}
+                            ) or {}
+                        ),
                         quiet=True,
                     )
                     tts_prefetch_futures.append(future)

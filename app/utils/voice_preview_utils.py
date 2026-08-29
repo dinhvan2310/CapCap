@@ -31,8 +31,17 @@ def save_manifest(tmp_dir: str, manifest: dict) -> None:
         json.dump(manifest, handle, ensure_ascii=False, indent=2)
 
 
-def segment_cache_key(*, text: str, voice_name: str, provider_speed: float) -> str:
-    payload = f"{voice_name}|{provider_speed:.3f}|{text.strip()}"
+def segment_cache_key(
+    *,
+    text: str,
+    voice_name: str,
+    provider_speed: float,
+    normalizer_signature: str = "",
+) -> str:
+    # A pronunciation dictionary changes the generated waveform even when
+    # subtitle text, voice, and speed remain identical. Include its stable
+    # fingerprint so stale TTS cache entries cannot survive a dictionary edit.
+    payload = f"{voice_name}|{provider_speed:.3f}|{normalizer_signature}|{text.strip()}"
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 

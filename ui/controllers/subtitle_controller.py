@@ -352,6 +352,8 @@ class SubtitleController:
         if hasattr(self.gui, "_rewrite_generate_btn"):
             self.gui._rewrite_generate_btn.setEnabled(True)
             self.gui._rewrite_generate_btn.setText("Generate Preview")
+        if hasattr(self.gui, "_rewrite_set_inputs_enabled"):
+            self.gui._rewrite_set_inputs_enabled(True)
         if error or not translated_srt:
             self.gui.update_project_step("refine_translation", "failed")
             self.gui.show_error(
@@ -367,9 +369,6 @@ class SubtitleController:
             self.gui._rewrite_preview_edit.setPlainText(translated_srt)
         if hasattr(self.gui, "_rewrite_preview_status_updater"):
             self.gui._rewrite_preview_status_updater()
-        if hasattr(self.gui, "_rewrite_status_label"):
-            self.gui._rewrite_status_label.setText("AI preview is ready. Review the read-only result, then press Apply to update the selected subtitles.")
-            self.gui._rewrite_status_label.setStyleSheet("color: #8ad7ff; font-size: 12px; font-weight: 700;")
         self.gui.update_project_step("refine_translation", "done")
         self.gui.refresh_ui_state()
 
@@ -524,8 +523,8 @@ class SubtitleController:
         dialog = QDialog(self.gui)
         dialog.setWindowTitle("Rewrite Subtitles")
         dialog.setModal(True)
-        dialog.setMinimumWidth(760)
-        dialog.setMinimumHeight(640)
+        dialog.setMinimumWidth(820)
+        dialog.setMinimumHeight(680)
         dialog.setStyleSheet(
             """
             QDialog { background-color: #0f1724; }
@@ -578,16 +577,19 @@ class SubtitleController:
         if str(initial_scope or "all").strip().lower() == "selected" and can_select_one:
             scope_combo.setCurrentIndex(1)
         scope_row.addWidget(scope_combo, 1)
-        scope_hint = QLabel("Use the checkboxes beside Rewrite SRT" if translated_segments else "No translated subtitles")
+        scope_hint = QLabel("" if translated_segments else "No translated subtitles")
         scope_hint.setObjectName("helperLabel")
         scope_row.addWidget(scope_hint)
         layout.addLayout(scope_row)
 
+        style_row = QHBoxLayout()
+        style_row.addWidget(QLabel("Style:"))
         style_combo = QComboBox(dialog)
         for label, instruction in load_prompt_options(self.REWRITE_STYLE_PRESETS_FILE):
             style_combo.addItem(label, instruction)
         style_combo.addItem("Custom", "custom")
-        layout.addWidget(style_combo)
+        style_row.addWidget(style_combo, 1)
+        layout.addLayout(style_row)
 
         custom_style_cb = QCheckBox("Add extra custom instruction", dialog)
         layout.addWidget(custom_style_cb)
@@ -603,20 +605,29 @@ class SubtitleController:
         status_label.setWordWrap(True)
         layout.addWidget(status_label)
 
-        preview_label = QLabel("Rewrite SRT — select cues to rewrite")
+        preview_label = QLabel("Translated subtitles")
         preview_label.setObjectName("sectionTitle")
         layout.addWidget(preview_label)
 
-        preview_split = QHBoxLayout()
+        preview_split = QVBoxLayout()
         preview_split.setSpacing(8)
 
+        selection_actions = QHBoxLayout()
+        select_all_btn = QPushButton("Select All", dialog)
+        unselect_all_btn = QPushButton("Unselect All", dialog)
+        selected_count_label = QLabel("0 / 0 selected")
+        selected_count_label.setObjectName("helperLabel")
+        selection_actions.addWidget(select_all_btn)
+        selection_actions.addWidget(unselect_all_btn)
+        selection_actions.addWidget(selected_count_label)
+        selection_actions.addStretch()
+        preview_split.addLayout(selection_actions)
+
         check_list = QListWidget(dialog)
-        check_list.setMinimumWidth(285)
-        check_list.setMaximumWidth(360)
-        check_list.setMinimumHeight(96)
+        check_list.setMinimumHeight(180)
         check_list.setStyleSheet(
             "QListWidget { background: #132033; color: #eff6ff; border: 1px solid #2f4868; border-radius: 8px; padding: 3px; }"
-            "QListWidget::item { padding: 5px 4px; }"
+            "QListWidget::item { padding: 7px 8px; }"
             "QListWidget::item:selected { background: #244d70; }"
         )
         for index, segment in enumerate(translated_segments):
@@ -629,18 +640,20 @@ class SubtitleController:
             end_ms = max(start_ms, int(round(end * 1000)))
             start_time = f"{start_ms // 3600000:02d}:{(start_ms // 60000) % 60:02d}:{(start_ms // 1000) % 60:02d},{start_ms % 1000:03d}"
             end_time = f"{end_ms // 3600000:02d}:{(end_ms // 60000) % 60:02d}:{(end_ms // 1000) % 60:02d},{end_ms % 1000:03d}"
-            item = QListWidgetItem(f"{index + 1:03d}  {start_time} → {end_time}\n{excerpt}", check_list)
+            item = QListWidgetItem(f"{index + 1:03d}  {start_time} -> {end_time}\n{excerpt}", check_list)
             item.setData(Qt.UserRole, index)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Unchecked)
-            if str(initial_scope or "all").strip().lower() == "selected" and index == selected_index:
-                item.setCheckState(Qt.Checked)
+            if str(initial_scope or "all").strip().lower() == "selected" and can_select_one:
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Checked if index == selected_index else Qt.Unchecked)
+            else:
+                item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable)
         preview_split.addWidget(check_list, 1)
 
         preview_edit = QTextEdit(dialog)
         preview_edit.setPlaceholderText("The AI rewrite preview will appear here.")
-        preview_edit.setPlainText(self.gui.format_to_srt(translated_segments))
         preview_edit.setReadOnly(True)
+        preview_edit.setMinimumHeight(180)
+        preview_edit.setVisible(False)
         preview_split.addWidget(preview_edit, 2)
         layout.addLayout(preview_split, 1)
 
@@ -652,10 +665,8 @@ class SubtitleController:
 
         button_row = QHBoxLayout()
         button_row.addStretch()
-        close_btn = QPushButton("Close", dialog)
         generate_btn = QPushButton("Generate Preview", dialog)
         apply_btn = QPushButton("Apply Rewrite", dialog)
-        button_row.addWidget(close_btn)
         button_row.addWidget(generate_btn)
         button_row.addWidget(apply_btn)
         layout.addLayout(button_row)
@@ -666,6 +677,7 @@ class SubtitleController:
 
         def _toggle_custom_instruction(checked: bool):
             custom_prompt.setVisible(bool(checked))
+            _invalidate_preview("Custom instruction changed. Generate a new preview.")
 
         def _build_style_instruction() -> str:
             base_instruction = str(style_combo.currentData() or "").strip()
@@ -697,7 +709,57 @@ class SubtitleController:
                 and 0 <= int(item.data(Qt.UserRole)) < len(translated_segments)
             ]
 
-        def _reset_scope_preview():
+        def _scope_view():
+            return scope_combo.currentData() == "checked"
+
+        def _update_selection_summary():
+            checked_scope = _scope_view()
+            selected_indices = _scope_indices()
+            if checked_scope:
+                selected_count_label.setText(f"{len(selected_indices)} / {len(translated_segments)} selected")
+                scope_hint.setText(
+                    "Select the subtitles to rewrite."
+                    if not selected_indices
+                    else f"{len(selected_indices)} subtitle(s) selected"
+                )
+            else:
+                selected_count_label.setText(f"{len(translated_segments)} subtitle(s)")
+                scope_hint.setText(
+                    f"All {len(translated_segments)} translated subtitles will be rewritten."
+                    if translated_segments
+                    else "No translated subtitles"
+                )
+            select_all_btn.setVisible(checked_scope)
+            unselect_all_btn.setVisible(checked_scope)
+            select_all_btn.setEnabled(checked_scope and check_list.count() > 0)
+            unselect_all_btn.setEnabled(checked_scope and bool(selected_indices))
+
+        def _show_selection_view():
+            preview_label.setText("Select subtitles to rewrite" if _scope_view() else "All translated subtitles")
+            check_list.setVisible(True)
+            select_all_btn.setVisible(_scope_view())
+            unselect_all_btn.setVisible(_scope_view())
+            selected_count_label.setVisible(True)
+            preview_edit.setVisible(False)
+
+        def _show_result_view():
+            preview_label.setText("AI Rewrite Preview")
+            check_list.setVisible(False)
+            select_all_btn.setVisible(False)
+            unselect_all_btn.setVisible(False)
+            selected_count_label.setVisible(False)
+            preview_edit.setVisible(True)
+
+        def _set_inputs_enabled(enabled: bool):
+            scope_combo.setEnabled(enabled)
+            style_combo.setEnabled(enabled)
+            custom_style_cb.setEnabled(enabled)
+            custom_prompt.setEnabled(enabled)
+            check_list.setEnabled(enabled)
+            select_all_btn.setEnabled(enabled and _scope_view() and check_list.count() > 0)
+            unselect_all_btn.setEnabled(enabled and _scope_view() and bool(_scope_indices()))
+
+        def _invalidate_preview(message="Choose a scope and generate an AI rewrite preview."):
             _source, _translated = _scope_segments()
             selected_indices = _scope_indices()
             self.gui._rewrite_selected_indices = selected_indices
@@ -705,36 +767,39 @@ class SubtitleController:
             self.gui._rewrite_source_segments = _source
             self.gui._rewrite_base_translated_segments = _translated
             self.gui._rewrite_preview_ready = False
-            preview_edit.setPlainText(self.gui.format_to_srt(_translated))
-            if scope_combo.currentData() == "checked" and not selected_indices:
+            preview_edit.clear()
+            _show_selection_view()
+            _update_selection_summary()
+            if _scope_view() and not selected_indices:
                 status_label.setText("Check at least one subtitle before generating an AI rewrite.")
-                scope_hint.setText("0 cues checked")
-            elif scope_combo.currentData() == "checked":
-                status_label.setText("Choose a scope and generate an AI rewrite preview.")
-                scope_hint.setText(f"{len(selected_indices)} cue(s) checked")
             else:
-                status_label.setText("Choose a scope and generate an AI rewrite preview.")
-                scope_hint.setText("All translated subtitles")
+                status_label.setText(message)
             status_label.setStyleSheet("")
             apply_btn.setEnabled(False)
 
+        def _reset_scope_preview():
+            _invalidate_preview()
+
         def _update_preview_validity():
+            if getattr(self.gui, "_rewrite_preview_ready", False):
+                _show_result_view()
+            else:
+                _show_selection_view()
             current_text = preview_edit.toPlainText().strip()
             if not current_text:
-                status_label.setText("Rewrite SRT is empty.")
-                status_label.setStyleSheet("color: #f6c177; font-size: 12px; font-weight: 600;")
+                if getattr(self.gui, "_rewrite_preview_ready", False):
+                    status_label.setText("The AI rewrite returned an empty result.")
                 apply_btn.setEnabled(False)
                 return
             is_valid_srt, parsed_segments, validation_mode, validation_error = self._validate_rewrite_srt(current_text)
-            if is_valid_srt and validation_mode == "srt":
-                if getattr(self.gui, "_rewrite_preview_ready", False):
-                    status_label.setText(f"AI rewrite ready. Segments: {len(parsed_segments)}.")
-                    status_label.setStyleSheet("color: #78f0b0; font-size: 12px; font-weight: 700;")
-                    apply_btn.setEnabled(True)
-                else:
-                    status_label.setText("Current subtitles are shown for reference. Generate an AI rewrite to enable Apply.")
-                    status_label.setStyleSheet("color: #9fb3ca; font-size: 12px; font-weight: 600;")
-                    apply_btn.setEnabled(False)
+            if is_valid_srt and validation_mode == "srt" and getattr(self.gui, "_rewrite_preview_ready", False):
+                status_label.setText(
+                    f"AI rewrite ready. Review the read-only result ({len(parsed_segments)} subtitle(s)), then apply it."
+                )
+                status_label.setStyleSheet("color: #78f0b0; font-size: 12px; font-weight: 700;")
+                apply_btn.setEnabled(True)
+            elif not getattr(self.gui, "_rewrite_preview_ready", False):
+                apply_btn.setEnabled(False)
             else:
                 status_label.setText(f"Invalid SRT. {validation_error or 'Keep standard blocks: index, time range, then subtitle text.'}")
                 status_label.setStyleSheet("color: #ff8f8f; font-size: 12px; font-weight: 700;")
@@ -746,16 +811,21 @@ class SubtitleController:
                 QMessageBox.information(dialog, "Rewrite", "Check at least one subtitle before generating an AI rewrite.")
                 return
             style_instruction = _build_style_instruction()
+            self.gui._rewrite_preview_ready = False
+            preview_edit.clear()
+            _show_selection_view()
             status_label.setText("Generating rewrite preview with AI...")
             apply_btn.setEnabled(False)
             generate_btn.setEnabled(False)
             generate_btn.setText("Generating...")
+            _set_inputs_enabled(False)
             self.gui.rewrite_translation_btn.setEnabled(False)
             self.gui.rewrite_translation_btn.setText("Rewriting...")
             self.gui.progress_bar.setValue(90)
             self.gui.update_project_step("refine_translation", "running")
 
             self.gui._rewrite_preview_status_updater = _update_preview_validity
+            self.gui._rewrite_set_inputs_enabled = _set_inputs_enabled
 
             self.gui._rewrite_source_segments = rewrite_source_segments
             self.gui._rewrite_base_translated_segments = rewrite_base_segments
@@ -778,6 +848,7 @@ class SubtitleController:
                 "_rewrite_generate_btn",
                 "_rewrite_status_label",
                 "_rewrite_preview_status_updater",
+                "_rewrite_set_inputs_enabled",
                 "_rewrite_source_segments",
                 "_rewrite_base_translated_segments",
                 "_rewrite_preview_ready",
@@ -789,22 +860,56 @@ class SubtitleController:
                 if hasattr(self.gui, attr):
                     delattr(self.gui, attr)
 
+        def _set_checkability(checked_scope: bool):
+            check_list.blockSignals(True)
+            try:
+                for row in range(check_list.count()):
+                    item = check_list.item(row)
+                    if checked_scope:
+                        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                        if item.checkState() not in (Qt.Checked, Qt.Unchecked):
+                            item.setCheckState(Qt.Unchecked)
+                    else:
+                        item.setCheckState(Qt.Unchecked)
+                        item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable)
+            finally:
+                check_list.blockSignals(False)
+
+        def _on_scope_changed(_index):
+            _set_checkability(_scope_view())
+            _reset_scope_preview()
+
+        def _set_all_checks(checked: bool):
+            if not _scope_view():
+                return
+            check_list.blockSignals(True)
+            try:
+                for row in range(check_list.count()):
+                    check_list.item(row).setCheckState(Qt.Checked if checked else Qt.Unchecked)
+            finally:
+                check_list.blockSignals(False)
+            _invalidate_preview()
+
         custom_style_cb.toggled.connect(_toggle_custom_instruction)
-        scope_combo.currentIndexChanged.connect(lambda _index: _reset_scope_preview())
+        scope_combo.currentIndexChanged.connect(_on_scope_changed)
+        style_combo.currentIndexChanged.connect(lambda _index: _invalidate_preview("Rewrite style changed. Generate a new preview."))
+        custom_prompt.textChanged.connect(
+            lambda _text: _invalidate_preview("Custom instruction changed. Generate a new preview.")
+        )
 
         def _handle_scope_item_changed(item):
-            if item.checkState() == Qt.Checked and scope_combo.currentData() != "checked":
-                scope_combo.setCurrentIndex(1)
-                return
-            if scope_combo.currentData() == "checked":
-                _reset_scope_preview()
+            if _scope_view():
+                _invalidate_preview()
 
         check_list.itemChanged.connect(_handle_scope_item_changed)
-        close_btn.clicked.connect(dialog.reject)
+        select_all_btn.clicked.connect(lambda: _set_all_checks(True))
+        unselect_all_btn.clicked.connect(lambda: _set_all_checks(False))
         generate_btn.clicked.connect(_start_preview_generation)
         apply_btn.clicked.connect(self.apply_rewrite_preview)
         dialog.finished.connect(lambda _result: _cleanup_dialog())
         self.gui._rewrite_preview_status_updater = _update_preview_validity
+        self.gui._rewrite_set_inputs_enabled = _set_inputs_enabled
+        _set_checkability(_scope_view())
         _reset_scope_preview()
         _update_preview_validity()
         dialog.exec()

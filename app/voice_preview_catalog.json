@@ -288,6 +288,204 @@
       "preview_audio_path": "",
       "preview_video_url": "",
       "preview_video_path": ""
+    },
+    {
+      "id": "adam1",
+      "name": "adam1 (Local)",
+      "provider": "piper",
+      "provider_voice": "models/piper/adam1.onnx",
+      "language": "vi",
+      "gender": "",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "minhthu",
+      "name": "Minhthu (Local)",
+      "provider": "piper",
+      "provider_voice": "models/piper/minhthu.onnx",
+      "language": "vi",
+      "gender": "",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "mytam2",
+      "name": "mytam2 (Local)",
+      "provider": "piper",
+      "provider_voice": "models/piper/mytam2.onnx",
+      "language": "vi",
+      "gender": "",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "mytam2794",
+      "name": "mytam2794 (Local)",
+      "provider": "piper",
+      "provider_voice": "models/piper/mytam2794.onnx",
+      "language": "vi",
+      "gender": "",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "ngocngan3701",
+      "name": "ngocngan3701 (Local)",
+      "provider": "piper",
+      "provider_voice": "models/piper/ngocngan3701.onnx",
+      "language": "vi",
+      "gender": "",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "taian4",
+      "name": "taian4 (Local)",
+      "provider": "piper",
+      "provider_voice": "models/piper/taian4.onnx",
+      "language": "vi",
+      "gender": "",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "thanhphuong2",
+      "name": "thanhphuong2 (Local)",
+      "provider": "piper",
+      "provider_voice": "models/piper/thanhphuong2.onnx",
+      "language": "vi",
+      "gender": "",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "thientam",
+      "name": "Thientam (Local)",
+      "provider": "piper",
+      "provider_voice": "models/piper/thientam.onnx",
+      "language": "vi",
+      "gender": "",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "tranthanh3870",
+      "name": "tranthanh3870 (Local)",
+      "provider": "piper",
+      "provider_voice": "models/piper/tranthanh3870.onnx",
+      "language": "vi",
+      "gender": "",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "vietthao3886",
+      "name": "vietthao3886 (Local)",
+      "provider": "piper",
+      "provider_voice": "models/piper/vietthao3886.onnx",
+      "language": "vi",
+      "gender": "",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "yannew",
+      "name": "Yannew (Local)",
+      "provider": "piper",
+      "provider_voice": "models/piper/yannew.onnx",
+      "language": "vi",
+      "gender": "",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
     }
   ]
 }

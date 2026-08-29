@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 
-from runtime_paths import app_path, models_path
+from runtime_paths import app_path, bundle_root
 from runtime_profile import is_remote_profile
 
 
@@ -11,7 +11,16 @@ class VoiceCatalogService:
     def __init__(self, workspace_root: str):
         self.workspace_root = workspace_root
         self.catalog_path = app_path("voice_preview_catalog.json")
-        self.piper_models_dirs = (models_path("piper"), models_path("piper-en"))
+        # A frozen build may create writable placeholder directories beside
+        # the executable while the bundled voices live under _internal.  Scan
+        # both roots so the placeholder never hides bundled Piper models.
+        candidates = []
+        for root in (self.workspace_root, bundle_root()):
+            for folder in ("piper", "piper-en"):
+                path = os.path.join(root, "models", folder)
+                if path not in candidates:
+                    candidates.append(path)
+        self.piper_models_dirs = tuple(candidates)
 
     def _read_payload(self) -> dict:
         if not os.path.exists(self.catalog_path):

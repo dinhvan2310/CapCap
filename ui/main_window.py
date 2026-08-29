@@ -76,7 +76,7 @@ from utils.settings_utils import load_user_settings as load_user_settings_impl, 
 from views import build_main_window_ui
 from widgets.progress_dialog import BackgroundableProgressDialog
 from widgets.subtitle_editor_dialog import SubtitleEditorDialog
-from runtime_paths import app_path, asset_path, models_path, workspace_root
+from runtime_paths import app_path, asset_path, bundle_root, models_path, workspace_root
 from runtime_profile import is_remote_profile
 from worker_adapters import (
     ExtractionWorker,
@@ -1261,10 +1261,23 @@ class VideoTranslatorGUI(QMainWindow):
             return free_value
         if free_value and free_value in getattr(self, "voice_catalog_map", {}):
             return free_value
+        # A gender filter can legitimately leave the selector empty. Do not
+        # silently fall back to a voice outside the user's selected filter.
+        combo_has_items = bool(hasattr(self, "free_voice_combo") and self.free_voice_combo.count())
         target_language = self.get_target_language_code()
-        if target_language == "vi" and "ngochuyen" in getattr(self, "voice_catalog_map", {}):
+        if (
+            combo_has_items
+            and target_language == "vi"
+            and "ngochuyen" in getattr(self, "voice_catalog_map", {})
+            and self.free_voice_combo.findData("ngochuyen") >= 0
+        ):
             return "ngochuyen"
-        if target_language == "vi" and "vi_VN-vais1000-medium" in getattr(self, "voice_catalog_map", {}):
+        if (
+            combo_has_items
+            and target_language == "vi"
+            and "vi_VN-vais1000-medium" in getattr(self, "voice_catalog_map", {})
+            and self.free_voice_combo.findData("vi_VN-vais1000-medium") >= 0
+        ):
             return "vi_VN-vais1000-medium"
         if hasattr(self, "free_voice_combo") and self.free_voice_combo.count() > 0:
             fallback_value = str(self.free_voice_combo.itemData(0) or "").strip()
@@ -1281,6 +1294,11 @@ class VideoTranslatorGUI(QMainWindow):
     def load_voice_preview_catalog(self):
         self._auto_sync_piper_voices_to_catalog()
         self.voice_catalog_entries_all = self.voice_catalog_service.load_catalog()
+        # A packaged build keeps its catalog under _internal (read-only), so
+        # newly downloaded piper-new voices may not be persisted there. Merge
+        # the local manifest in memory as well, ensuring their names/genders
+        # are immediately available to the selector and gender filter.
+        self._merge_piper_manifest_voices()
         self._apply_piper_voice_meta_overrides()
         if self.voice_preview_dialog is not None:
             self.voice_preview_dialog.close()
@@ -1300,6 +1318,75 @@ class VideoTranslatorGUI(QMainWindow):
             return voices if isinstance(voices, dict) else {}
         except Exception:
             return {}
+
+    def _load_piper_voice_manifest(self) -> dict[str, dict]:
+        """Load piper-new's shared voice metadata keyed by model stem."""
+        manifest_path = models_path("piper", "voices.json")
+        if not os.path.isfile(manifest_path):
+            return {}
+        try:
+            with open(manifest_path, "r", encoding="utf-8-sig") as handle:
+                payload = json.load(handle)
+        except Exception:
+            return {}
+        entries: dict[str, dict] = {}
+        if not isinstance(payload, list):
+            return entries
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            audio_path = str(item.get("audio_path", "") or "").replace("\\", "/").strip()
+            voice_id = os.path.splitext(os.path.basename(audio_path))[0]
+            if voice_id:
+                entries[voice_id] = dict(item)
+        return entries
+
+    def _merge_piper_manifest_voices(self) -> None:
+        """Merge local piper-new models/metadata into the in-memory catalog."""
+        manifest = self._load_piper_voice_manifest()
+        if not manifest:
+            return
+        existing = {
+            str(entry.get("id", "")).strip(): entry
+            for entry in (self.voice_catalog_entries_all or [])
+            if isinstance(entry, dict) and str(entry.get("id", "")).strip()
+        }
+        for voice_id, meta in manifest.items():
+            model_path = models_path("piper", f"{voice_id}.onnx")
+            if not os.path.isfile(model_path) or os.path.getsize(model_path) <= 0:
+                continue
+            name = str(meta.get("name", "") or "").strip() or voice_id
+            gender = self._normalize_gender_value(str(meta.get("gender", "") or ""))
+            entry = existing.get(voice_id)
+            if entry is None:
+                entry = {
+                    "id": voice_id,
+                    "name": name,
+                    "provider": "piper",
+                    "provider_voice": f"models/piper/{voice_id}.onnx",
+                    "language": "vi",
+                    "gender": gender,
+                    "tier": "free",
+                    "preview_video_url": "",
+                    "preview_video_path": "",
+                    "preview_audio_url": "",
+                    "preview_audio_path": "",
+                    "enabled": True,
+                    "tags": ["local", "piper"],
+                }
+                if str(meta.get("description", "") or "").strip():
+                    entry["description"] = str(meta.get("description")).strip()
+                self.voice_catalog_entries_all.append(entry)
+                existing[voice_id] = entry
+                continue
+            # Manifest metadata is authoritative for piper-new display data,
+            # but keep project/catalog-specific fields such as preview media.
+            if name and str(entry.get("name", "")).strip() != name:
+                entry["name"] = name
+            if gender and self._normalize_gender_value(str(entry.get("gender", ""))) != gender:
+                entry["gender"] = gender
+            if str(meta.get("description", "") or "").strip():
+                entry["description"] = str(meta.get("description")).strip()
 
     def _normalize_gender_value(self, value: str) -> str:
         raw = str(value or "").strip().lower()
@@ -1349,10 +1436,19 @@ class VideoTranslatorGUI(QMainWindow):
                 entry["gender"] = self._normalize_gender_value(meta.get("gender", ""))
 
     def _auto_sync_piper_voices_to_catalog(self):
-        model_directories = (
-            (models_path("piper"), "models/piper"),
-            (models_path("piper-en"), "models/piper-en"),
-        )
+        # Include both writable and bundled roots.  In a packaged build the
+        # writable models/piper directory can exist as an empty download
+        # target, and must not hide voices shipped under _internal/models.
+        model_directories = []
+        seen_directories = set()
+        for root in (self.workspace_root, bundle_root()):
+            for folder, relative_dir in (("piper", "models/piper"), ("piper-en", "models/piper-en")):
+                directory = os.path.join(root, "models", folder)
+                if directory in seen_directories:
+                    continue
+                seen_directories.add(directory)
+                model_directories.append((directory, relative_dir))
+        model_directories = tuple(model_directories)
         if not any(os.path.isdir(path) for path, _relative_path in model_directories):
             return
         catalog_path = app_path("voice_preview_catalog.json")
@@ -1376,13 +1472,31 @@ class VideoTranslatorGUI(QMainWindow):
             return " ".join(out) if out else stem
 
         def language_from_piper_config(model_path: str) -> str:
-            cfg_path = f"{model_path}.json"
-            if not os.path.exists(cfg_path):
-                return ""
-            try:
-                with open(cfg_path, "r", encoding="utf-8", errors="ignore") as handle:
-                    head = handle.read(16384)
-            except Exception:
+            # Legacy packs have one config beside each model.  The current
+            # piper-new Vietnamese pack shares models/piper/config.json, so
+            # fall back to the containing directory when the per-model file
+            # is absent.
+            folder_name = os.path.basename(os.path.dirname(model_path))
+            shared_config = os.path.join(os.path.dirname(model_path), "config.json")
+            candidates = (
+                [shared_config, f"{model_path}.json"]
+                if folder_name.lower() == "piper"
+                else [f"{model_path}.json", shared_config]
+            )
+            if folder_name:
+                candidates.append(models_path(folder_name, "config.json"))
+            head = ""
+            for cfg_path in candidates:
+                if not os.path.isfile(cfg_path):
+                    continue
+                try:
+                    with open(cfg_path, "r", encoding="utf-8", errors="ignore") as handle:
+                        head = handle.read(16384)
+                    if head:
+                        break
+                except Exception:
+                    continue
+            if not head:
                 return ""
             match = re.search(
                 r"\"espeak\"\\s*:\\s*{[^}]*\"voice\"\\s*:\\s*\"([^\"]+)\"",
@@ -1992,7 +2106,10 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "free_voice_combo"):
             self.free_voice_combo.setEnabled(True)
         if hasattr(self, "preview_voice_btn"):
-            self.preview_voice_btn.setVisible(mode in ("voice", "both"))
+            # Preview Voice belongs to Voice Setup and should remain available
+            # whenever the Voice panel is open, independent of output-mode
+            # compatibility state.
+            self.preview_voice_btn.setVisible(True)
         self._update_voice_preview_meta()
 
     def _parse_voice_speed_value(self) -> float:
@@ -2143,19 +2260,13 @@ class VideoTranslatorGUI(QMainWindow):
     def _resource_service(self) -> ResourceDownloadService:
         return ResourceDownloadService(self.workspace_root)
 
-    def _open_vietdict_folder(self, resource_id: str):
-        from runtime_paths import models_path
-        dir_path = models_path("vietnormalizer")
-        os.makedirs(dir_path, exist_ok=True)
-        os.startfile(dir_path)
-
     def _create_vietdict_template(self, resource_id: str):
-        import csv
-        from runtime_paths import models_path
-        dir_path = models_path("vietnormalizer")
-        os.makedirs(dir_path, exist_ok=True)
+        # Kept as a compatibility no-op for old callers.  Dictionaries are
+        # now stored in project state and are edited in Subtitle Inspector.
+        return
+        """
 
-        acronyms_path = os.path.join(dir_path, "acronyms.csv")
+        acronyms_path = os.path.join("", "acronyms.csv")
         if not os.path.exists(acronyms_path):
             with open(acronyms_path, "w", encoding="utf-8", newline="") as f:
                 w = csv.writer(f)
@@ -2174,6 +2285,8 @@ class VideoTranslatorGUI(QMainWindow):
 
         os.startfile(dir_path)
 
+        """
+
     def _vietdict_add_row(self, table):
         from PySide6.QtWidgets import QTableWidgetItem
         r = table.rowCount()
@@ -2188,15 +2301,26 @@ class VideoTranslatorGUI(QMainWindow):
             table.removeRow(r)
 
     def open_normalizer_dict_dialog(self):
-        import csv
-        from pathlib import Path
-        from runtime_paths import models_path
-        custom_dir = Path(models_path("vietnormalizer"))
-        custom_dir.mkdir(parents=True, exist_ok=True)
+        """Edit the pronunciation dictionary stored in this project.
+
+        This is deliberately project state rather than a global CSV resource:
+        the same word may need different pronunciation in different videos.
+        The dictionary is passed to Piper only; subtitle text is untouched.
+        """
+        if not str(self.video_path_edit.text().strip() if hasattr(self, "video_path_edit") else ""):
+            QMessageBox.information(self, "Normalizer Dictionary", "Open a project before editing its pronunciation dictionary.")
+            return
+        state = self.ensure_current_project()
+        if state is None:
+            QMessageBox.information(self, "Normalizer Dictionary", "Open a project before editing its pronunciation dictionary.")
+            return
+        if not self._translation_phase_complete():
+            QMessageBox.information(self, "Normalizer Dictionary", "Complete the Translation phase before editing the project dictionary.")
+            return
 
         DICT_DEFS = [
-            {"label": "Acronyms", "file": "acronyms.csv", "col_a": "acronym", "col_b": "transliteration"},
-            {"label": "Non-Vietnamese Words", "file": "non-vietnamese-words.csv", "col_a": "original", "col_b": "transliteration"},
+            {"label": "Acronyms", "key": "acronyms", "col_a": "acronym", "col_b": "transliteration"},
+            {"label": "Non-Vietnamese Words", "key": "non_vietnamese_words", "col_a": "original", "col_b": "transliteration"},
         ]
 
         dialog = QDialog(self)
@@ -2232,7 +2356,12 @@ class VideoTranslatorGUI(QMainWindow):
         title.setStyleSheet("color: #f8fbff; font-size: 16px; font-weight: 700;")
         layout.addWidget(title)
 
-        hint = QLabel(f"Dictionary location: {custom_dir}\nEntries here override built-in normalizer rules.", dialog)
+        project_name = str(getattr(state, "project_id", "") or "current project")
+        hint = QLabel(
+            f"Project: {project_name}\n"
+            "Entries affect Piper pronunciation only; translated subtitle text is not changed.",
+            dialog,
+        )
         hint.setStyleSheet("color: #9fb3ca; font-size: 12px;")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -2270,7 +2399,7 @@ class VideoTranslatorGUI(QMainWindow):
             add_btn.clicked.connect(lambda _checked=False, t=table: self._vietdict_add_row(t))
             remove_btn.clicked.connect(lambda _checked=False, t=table: self._vietdict_remove_row(t))
 
-            tables[defn["file"]] = {"table": table, "defn": defn}
+            tables[defn["key"]] = {"table": table, "defn": defn}
             tabs.addTab(tab, defn["label"])
 
         bottom_row = QHBoxLayout()
@@ -2286,28 +2415,28 @@ class VideoTranslatorGUI(QMainWindow):
         layout.addLayout(bottom_row)
 
         def _load_all():
-            for fname, meta in tables.items():
-                file_path = custom_dir / fname
+            settings = getattr(state, "settings", {}) or {}
+            dictionary = settings.get("normalizer_dictionary", {}) or {}
+            for key, meta in tables.items():
+                rows = dictionary.get(key, []) if isinstance(dictionary, dict) else []
                 table = meta["table"]
                 table.setRowCount(0)
-                if file_path.exists():
-                    try:
-                        with open(file_path, encoding="utf-8", newline="") as f:
-                            reader = csv.DictReader(f)
-                            for row in reader:
-                                a = (row.get(meta["defn"]["col_a"]) or "").strip()
-                                b = (row.get(meta["defn"]["col_b"]) or "").strip()
-                                if a or b:
-                                    r = table.rowCount()
-                                    table.insertRow(r)
-                                    table.setItem(r, 0, QTableWidgetItem(a))
-                                    table.setItem(r, 1, QTableWidgetItem(b))
-                    except Exception:
-                        pass
+                if isinstance(rows, dict):
+                    rows = [rows]
+                for row in rows if isinstance(rows, (list, tuple)) else []:
+                    if not isinstance(row, dict):
+                        continue
+                    a = str(row.get(meta["defn"]["col_a"], row.get("key", "")) or "").strip()
+                    b = str(row.get(meta["defn"]["col_b"], row.get("value", "")) or "").strip()
+                    if a or b:
+                        r = table.rowCount()
+                        table.insertRow(r)
+                        table.setItem(r, 0, QTableWidgetItem(a))
+                        table.setItem(r, 1, QTableWidgetItem(b))
 
         def _save_all():
-            for fname, meta in tables.items():
-                file_path = custom_dir / fname
+            dictionary = {}
+            for key, meta in tables.items():
                 table = meta["table"]
                 rows = []
                 for r in range(table.rowCount()):
@@ -2315,11 +2444,24 @@ class VideoTranslatorGUI(QMainWindow):
                     b = (table.item(r, 1).text() if table.item(r, 1) else "").strip()
                     if a or b:
                         rows.append({meta["defn"]["col_a"]: a, meta["defn"]["col_b"]: b})
-                with open(file_path, "w", encoding="utf-8", newline="") as f:
-                    w = csv.DictWriter(f, fieldnames=[meta["defn"]["col_a"], meta["defn"]["col_b"]])
-                    w.writeheader()
-                    w.writerows(rows)
-            print("[VietDict] Dictionary saved.")
+                dictionary[key] = rows
+            try:
+                state.set_setting("normalizer_dictionary", dictionary)
+                self.current_project_state = state
+                self.project_service.save_project(state)
+                try:
+                    from tts_processor import reset_vietnamese_normalizer_cache
+                    reset_vietnamese_normalizer_cache()
+                except Exception as exc:
+                    self.log(f"[VietDict] Cache refresh warning: {exc}")
+                self._voiceover_force_refresh = True
+                self._pending_voice_signature = ""
+                self.log(f"[VietDict] Saved project pronunciation dictionary ({project_name}).")
+                self.refresh_ui_state()
+                QMessageBox.information(dialog, "Normalizer Dictionary", "Project dictionary saved. New Preview Voice, Regenerate Voice, and TTS runs will use it immediately.")
+            except Exception as exc:
+                self.log(f"[VietDict] Save failed: {exc}")
+                QMessageBox.critical(dialog, "Normalizer Dictionary", "Could not save the project dictionary. No pronunciation changes were applied.\n\n" + str(exc))
 
         save_btn.clicked.connect(_save_all)
 
@@ -3736,6 +3878,18 @@ class VideoTranslatorGUI(QMainWindow):
             voice_segments = self._get_voiceover_segments()
         if not voice_segments:
             return ""
+        normalizer_signature = ""
+        try:
+            from tts_processor import normalizer_dictionary_fingerprint
+            settings = getattr(self.current_project_state, "settings", {}) or {}
+            normalizer_signature = normalizer_dictionary_fingerprint(
+                settings.get("normalizer_dictionary", {})
+            )
+        except Exception:
+            # Signature generation must not prevent a project from opening;
+            # the TTS cache still remains usable when the optional normalizer
+            # package is unavailable.
+            normalizer_signature = ""
         return self.project_service.build_voice_signature(
             voice_segments,
             audio_handling_mode=self.get_audio_handling_mode(),
@@ -3745,6 +3899,7 @@ class VideoTranslatorGUI(QMainWindow):
             background_path=background_path,
             original_volume=int(self.audio_a1_volume_slider.value()) if hasattr(self, "audio_a1_volume_slider") else 50,
             dub_volume=int(self.audio_a2_volume_slider.value()) if hasattr(self, "audio_a2_volume_slider") else 100,
+            normalizer_signature=normalizer_signature,
         )
 
     def persist_current_timeline_project_data(self):
@@ -7769,6 +7924,10 @@ class VideoTranslatorGUI(QMainWindow):
         ):
             btn = getattr(self, attr, None)
             if btn is not None:
+                # These actions only make sense once translated subtitle
+                # data exists.  Keep them out of the inspector until the
+                # Translation phase has completed successfully.
+                btn.setVisible(translation_ready)
                 btn.setEnabled(valid and translation_ready)
         # Shared section: Original text
         orig_lbl = getattr(self, "inspector_original_text_label", None)
@@ -11361,12 +11520,16 @@ class VideoTranslatorGUI(QMainWindow):
             self.preview_voice_btn.setEnabled(False)
             self.preview_voice_btn.setText("...")
 
+        project_state = getattr(self, "current_project_state", None) or self.ensure_current_project()
+        project_settings = getattr(project_state, "settings", {}) or {}
+        normalizer_dictionary = dict(project_settings.get("normalizer_dictionary", {}) or {})
         worker = VoiceSamplePreviewWorker(
             self.workspace_root,
             text,
             voice_name,
             voice_speed,
             temp_dir=self.get_project_temp_dir("voice_sample_preview"),
+            normalizer_dictionary=normalizer_dictionary,
         )
         worker.progress.connect(self.log)
         worker.finished.connect(self.on_voice_sample_preview_ready)
@@ -11411,6 +11574,9 @@ class VideoTranslatorGUI(QMainWindow):
             QMessageBox.warning(self, "Missing Voice", "Choose a voice first before generating subtitle audio preview.")
             return
         voice_speed = self._parse_voice_speed_value()
+        project_state = getattr(self, "current_project_state", None) or self.ensure_current_project()
+        project_settings = getattr(project_state, "settings", {}) or {}
+        normalizer_dictionary = dict(project_settings.get("normalizer_dictionary", {}) or {})
         row = self._find_segment_editor_row(index)
         # The per-segment "Regenerate voice" button was moved to the
         # A2 Dub Track Inspector. Disable that one instead.
@@ -11430,6 +11596,7 @@ class VideoTranslatorGUI(QMainWindow):
             voice_speed,
             temp_dir=self.get_project_temp_dir("segment_audio_preview"),
             cache_temp_dir=self.get_project_temp_dir("tts"),
+            normalizer_dictionary=normalizer_dictionary,
         )
         worker.finished.connect(self.on_segment_audio_preview_ready)
         self._segment_preview_threads[index] = worker
@@ -11749,7 +11916,11 @@ class VideoTranslatorGUI(QMainWindow):
     def apply_segments_to_timeline(self):
         segs = self.get_active_segments()
         if segs:
-            predict_speed_ratios(segs)
+            settings = getattr(self.current_project_state, "settings", {}) or {}
+            predict_speed_ratios(
+                segs,
+                normalizer_dictionary=dict(settings.get("normalizer_dictionary", {}) or {}),
+            )
         self.timeline.set_segments(segs if segs else [])
         self.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
         # Configure the Qt subtitle overlay before showing its drag target.
@@ -12387,11 +12558,16 @@ class VideoTranslatorGUI(QMainWindow):
         self.translate_btn.setEnabled(bool(self.transcript_text.toPlainText().strip()))
         self.apply_translated_btn.setEnabled(translation_ready and has_translated_text)
         if hasattr(self, "rewrite_translation_btn"):
+            self.rewrite_translation_btn.setVisible(translation_ready)
             self.rewrite_translation_btn.setEnabled(
                 translation_ready and bool(self.transcript_text.toPlainText().strip()) and has_translated_text
             )
         if hasattr(self, "subtitle_editor_btn"):
+            self.subtitle_editor_btn.setVisible(translation_ready)
             self.subtitle_editor_btn.setEnabled(translation_ready and not review_mode)
+        if hasattr(self, "normalizer_dict_btn"):
+            self.normalizer_dict_btn.setVisible(translation_ready)
+            self.normalizer_dict_btn.setEnabled(translation_ready and not review_mode)
         if hasattr(self, "rewrite_selected_segment_btn"):
             has_selected_segment = 0 <= int(getattr(self, "_selected_segment_index", -1)) < len(self.current_translated_segments or [])
             self.rewrite_selected_segment_btn.setEnabled(
@@ -12487,7 +12663,7 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "mixed_audio_edit"):
             self.mixed_audio_edit.setEnabled(mode in ("voice", "both") and bool(hasattr(self, "use_existing_audio_radio") and self.use_existing_audio_radio.isChecked()))
         if hasattr(self, "preview_voice_btn"):
-            self.preview_voice_btn.setVisible(mode in ("voice", "both"))
+            self.preview_voice_btn.setVisible(True)
             self.preview_voice_btn.setEnabled(bool(self.voice_catalog_entries_all))
         has_timeline_segments = bool(self.get_active_segments())
         selected_overlay_is_splittable = False

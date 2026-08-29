@@ -492,6 +492,9 @@ def build_start_group(gui, left_layout):
     gui.free_voice_combo = QComboBox()
     gui.voice_gender_combo = QComboBox()
     gui.voice_gender_combo.addItems(["Any", "Male", "Female"])
+    # Default to the bundled Ngọc Huyền voice and its matching gender. Users
+    # can choose Any to show the complete voice list.
+    gui.voice_gender_combo.setCurrentText("Female")
     gui.voice_gender_combo.currentTextChanged.connect(gui.on_voice_gender_changed)
     gui.voice_speed_spin = QComboBox(gui)
     gui.voice_speed_spin.setEditable(True)

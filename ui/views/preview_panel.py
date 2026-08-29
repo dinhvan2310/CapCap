@@ -1262,20 +1262,39 @@ def build_preview_panel(gui):
     gui.rewrite_translation_btn = QPushButton("Rewrite")
     gui.subtitle_editor_btn = QPushButton("Subtitle Editor")
     gui.import_translation_btn = QPushButton("Import SRT")
+    gui.normalizer_dict_btn = QPushButton("Normalizer Dictionary")
+    gui.normalizer_dict_btn.setToolTip("Project-specific Piper pronunciation dictionary")
     gui.audio_inspector_regenerate_voice_btn = QPushButton("Regenerate voice")
     gui.audio_inspector_regenerate_voice_btn.setToolTip(
         "Re-generate the dubbed voice for the currently selected segment."
     )
     gui.rewrite_translation_btn.setEnabled(False)
     gui.subtitle_editor_btn.setEnabled(False)
+    gui.normalizer_dict_btn.setEnabled(False)
     gui.audio_inspector_regenerate_voice_btn.setEnabled(False)
+    gui.rewrite_translation_btn.setVisible(False)
+    gui.subtitle_editor_btn.setVisible(False)
+    gui.normalizer_dict_btn.setVisible(False)
+    gui.audio_inspector_regenerate_voice_btn.setVisible(False)
     gui.subtitle_editor_btn.clicked.connect(gui.open_subtitle_editor)
     inspector_actions_row.addWidget(gui.rewrite_translation_btn)
     inspector_actions_row.addWidget(gui.subtitle_editor_btn)
-    inspector_actions_row.addWidget(gui.import_translation_btn)
-    inspector_actions_row.addWidget(gui.audio_inspector_regenerate_voice_btn)
+    inspector_actions_row.addWidget(gui.normalizer_dict_btn)
     inspector_actions_row.addStretch(1)
     inspector_layout.addLayout(inspector_actions_row)
+
+    # Keep the voice-generation action on its own row.  The other subtitle
+    # review actions can have long labels as well, and placing all of them in
+    # one row caused the Regenerate voice label to be clipped in the compact
+    # inspector.  The same button instance is retained so its visibility,
+    # enablement, and existing signal wiring are unchanged.
+    inspector_voice_actions_row = QHBoxLayout()
+    inspector_voice_actions_row.setSpacing(8)
+    inspector_voice_actions_row.addWidget(gui.import_translation_btn)
+    inspector_voice_actions_row.addWidget(gui.audio_inspector_regenerate_voice_btn)
+    inspector_voice_actions_row.addStretch(1)
+    inspector_layout.addLayout(inspector_voice_actions_row)
+    gui.inspector_voice_actions_row = inspector_voice_actions_row
 
     # The original transcript is shown immediately above the editable
     # "Text shown on screen" field inside the selected subtitle card.  Do

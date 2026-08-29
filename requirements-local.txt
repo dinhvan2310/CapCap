@@ -5,6 +5,9 @@ soundfile
 numpy
 huggingface_hub
 faster-whisper
+# CUDA 12.8 / Blackwell-compatible CTranslate2 runtime. faster-whisper
+# allows older 4.x releases, which may not support the bundled CUDA pack.
+ctranslate2>=4.6.3,<5
 vietnormalizer
 piper-tts
 onnxruntime-gpu

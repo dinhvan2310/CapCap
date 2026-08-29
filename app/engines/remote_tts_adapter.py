@@ -16,6 +16,7 @@ class RemoteTTSAdapter:
         speed: float = 1.0,
         tmp_dir: str | None = None,
         on_progress: callable = None,
+        normalizer_dictionary=None,
     ) -> str:
         if on_progress:
             on_progress(f"Remote TTS: synthesizing with PC server ({voice})...")
@@ -26,6 +27,7 @@ class RemoteTTSAdapter:
                 "voice": voice,
                 "speed": float(speed),
                 "tmp_dir_hint": os.path.basename(str(tmp_dir or "").strip()) if tmp_dir else "",
+                "normalizer_dictionary": normalizer_dictionary or {},
             },
         )
         audio_b64 = str(response.get("audio_b64", "") or "").strip()

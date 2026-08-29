@@ -56,10 +56,20 @@ def bin_path(*parts: str) -> str:
 
 
 def models_path(*parts: str) -> str:
-    return first_existing_path(
-        join_root("models", *parts),
-        os.path.join(bundle_root(), "models", *parts),
-    )
+    writable = join_root("models", *parts)
+    bundled = os.path.join(bundle_root(), "models", *parts)
+
+    # Packaged builds create writable placeholder directories so optional
+    # resources can be downloaded after installation.  For SenseVoice that
+    # placeholder must not shadow a complete bundled model under _internal.
+    # Keep the normal writable-first behavior for every other model family.
+    if parts and str(parts[0]).strip().lower() == "sensevoice":
+        required = ("model.int8.onnx", "tokens.txt")
+        for candidate in (writable, bundled):
+            if all(os.path.isfile(os.path.join(candidate, name)) for name in required):
+                return candidate
+
+    return first_existing_path(writable, bundled)
 
 
 def temp_path(*parts: str) -> str:

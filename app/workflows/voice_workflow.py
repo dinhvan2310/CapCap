@@ -22,7 +22,7 @@ segment_cache_key = _vpu.segment_cache_key
 voice_provider = _vpu.voice_provider
 
 
-def predict_speed_ratios(segments):
+def predict_speed_ratios(segments, *, normalizer_dictionary=None):
     if not segments:
         return segments
     try:
@@ -36,7 +36,11 @@ def predict_speed_ratios(segments):
         if not raw_text:
             seg["pre_speed_ratio"] = 1.0
             continue
-        text = _norm(raw_text, provider="piper") or raw_text
+        text = _norm(
+            raw_text,
+            provider="piper",
+            normalizer_dictionary=normalizer_dictionary,
+        ) or raw_text
         duration_sec = max(0.1, float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)))
         words = len([t for t in re.split(r"\s+", text) if t])
         speech_cost = 0
@@ -83,6 +87,20 @@ class VoiceWorkflow:
         self.engine_runtime = EngineRuntime()
     def _load_state(self, project_state_path: str = ""):
         return self.project_service.load_project(project_state_path) if project_state_path else None
+
+    @staticmethod
+    def _normalizer_dictionary_from_state(state) -> dict:
+        settings = getattr(state, "settings", {}) if state is not None else {}
+        value = settings.get("normalizer_dictionary", {}) if isinstance(settings, dict) else {}
+        return dict(value) if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _normalizer_signature(dictionary) -> str:
+        try:
+            from tts_processor import normalizer_dictionary_fingerprint
+            return normalizer_dictionary_fingerprint(dictionary)
+        except Exception:
+            return ""
 
     def _measure_audio_loudness_db(self, audio_path: str) -> float:
         """Measure mean loudness in dBFS using pydub."""
@@ -157,7 +175,16 @@ class VoiceWorkflow:
     def _save_manifest(self, tmp_dir: str, manifest: dict) -> None:
         save_manifest(tmp_dir, manifest)
 
-    def _update_manifest_entries(self, *, tmp_dir: str, segments, wavs, voice_name: str, provider_speed: float) -> None:
+    def _update_manifest_entries(
+        self,
+        *,
+        tmp_dir: str,
+        segments,
+        wavs,
+        voice_name: str,
+        provider_speed: float,
+        normalizer_signature: str = "",
+    ) -> None:
         manifest = load_manifest(tmp_dir)
         manifest_segments = dict(manifest.get("segments", {}) or {})
         manifest_by_cache_key = dict(manifest.get("by_cache_key", {}) or {})
@@ -170,6 +197,7 @@ class VoiceWorkflow:
                 text=text,
                 voice_name=segment_voice_name,
                 provider_speed=provider_speed,
+                normalizer_signature=normalizer_signature,
             )
             entry = {
                 "cache_key": cache_key,
@@ -177,6 +205,7 @@ class VoiceWorkflow:
                 "text": text,
                 "voice_name": segment_voice_name,
                 "provider_speed": float(provider_speed),
+                "normalizer_signature": normalizer_signature,
             }
             manifest_segments[str(idx)] = entry
             manifest_by_cache_key[cache_key] = dict(entry)
@@ -184,8 +213,20 @@ class VoiceWorkflow:
         manifest["by_cache_key"] = manifest_by_cache_key
         save_manifest(tmp_dir, manifest)
 
-    def _segment_cache_key(self, *, text: str, voice_name: str, provider_speed: float) -> str:
-        return segment_cache_key(text=text, voice_name=voice_name, provider_speed=provider_speed)
+    def _segment_cache_key(
+        self,
+        *,
+        text: str,
+        voice_name: str,
+        provider_speed: float,
+        normalizer_signature: str = "",
+    ) -> str:
+        return segment_cache_key(
+            text=text,
+            voice_name=voice_name,
+            provider_speed=provider_speed,
+            normalizer_signature=normalizer_signature,
+        )
 
     def _voice_provider(self, voice_name: str) -> str:
         return voice_provider(voice_name)
@@ -208,14 +249,37 @@ class VoiceWorkflow:
     def _count_words(self, text: str) -> int:
         return len([token for token in re.split(r"\s+", str(text or "").strip()) if token])
 
-    def _normalized_tts_text(self, text: str, *, voice_provider: str = "") -> str:
+    def _normalized_tts_text(
+        self,
+        text: str,
+        *,
+        voice_provider: str = "",
+        normalizer_dictionary=None,
+    ) -> str:
         from tts_processor import normalize_text_for_tts
         return " ".join(
-            str(normalize_text_for_tts(text, provider=voice_provider or "piper") or "").replace("\n", " ").split()
+            str(
+                normalize_text_for_tts(
+                    text,
+                    provider=voice_provider or "piper",
+                    normalizer_dictionary=normalizer_dictionary,
+                )
+                or ""
+            ).replace("\n", " ").split()
         ).strip()
 
-    def _count_spoken_words(self, text: str, *, voice_provider: str = "") -> int:
-        normalized = self._normalized_tts_text(text, voice_provider=voice_provider)
+    def _count_spoken_words(
+        self,
+        text: str,
+        *,
+        voice_provider: str = "",
+        normalizer_dictionary=None,
+    ) -> int:
+        normalized = self._normalized_tts_text(
+            text,
+            voice_provider=voice_provider,
+            normalizer_dictionary=normalizer_dictionary,
+        )
         return self._count_words(normalized)
 
     def _spoken_budget_vi(self, *, duration_sec: float, speech_cost: int) -> int:
@@ -612,6 +676,7 @@ class VoiceWorkflow:
         provider_speed: float,
         target_duration: float,
         on_progress: callable = None,
+        normalizer_dictionary=None,
     ) -> tuple[str, float]:
         base_path = os.path.join(tmp_dir, f"seg_{idx:04d}_attempt_{attempt:02d}.wav")
         self.engine_runtime.synthesize_segment(
@@ -621,6 +686,7 @@ class VoiceWorkflow:
             speed=provider_speed,
             tmp_dir=tmp_dir,
             on_progress=on_progress,
+            normalizer_dictionary=normalizer_dictionary,
         )
         actual_duration = self._probe_wav_duration_seconds(base_path)
         ratio = (actual_duration / target_duration) if target_duration > 0 else 0.0
@@ -734,6 +800,7 @@ class VoiceWorkflow:
         ai_rewrite_dubbing: bool = False,
         source_language: str = "auto",
         style_instruction: str = "",
+        normalizer_dictionary=None,
         log: bool = True,
     ):
         prepared = []
@@ -746,7 +813,11 @@ class VoiceWorkflow:
             speech_cost = self._estimate_speech_cost(subtitle_text)
             max_words_vi = self._max_words_vi(duration_sec, speech_cost)
             original_words = self._count_words(subtitle_text)
-            spoken_words = self._count_spoken_words(spoken_text, voice_provider=voice_provider)
+            spoken_words = self._count_spoken_words(
+                spoken_text,
+                voice_provider=voice_provider,
+                normalizer_dictionary=normalizer_dictionary,
+            )
             action_taken = "manual_voice" if voice_edited else "accept"
             current["tts_text"] = spoken_text if voice_edited and spoken_text != subtitle_text else ""
             current["dubbing_vi"] = spoken_text
@@ -1157,12 +1228,14 @@ class VoiceWorkflow:
         voice_provider: str = '',
         on_progress: callable = None,
         index_offset: int = 0,
+        normalizer_dictionary=None,
         log: bool = True,
     ):
         segments = list(segments or [])
         manifest = self._load_manifest(tmp_dir)
         manifest_segments = dict(manifest.get("segments", {}) or {})
         manifest_by_cache_key = dict(manifest.get("by_cache_key", {}) or {})
+        normalizer_signature = self._normalizer_signature(normalizer_dictionary)
         wavs = [""] * len(segments)
         pending_jobs = []
         cache_hits = 0
@@ -1175,7 +1248,12 @@ class VoiceWorkflow:
                 continue
             segment_voice_name = str(seg.get("voice_name") or voice_name).strip() or voice_name
             seg_wav = os.path.join(tmp_dir, f"seg_{global_idx:04d}_base.wav")
-            cache_key = self._segment_cache_key(text=txt, voice_name=segment_voice_name, provider_speed=provider_speed)
+            cache_key = self._segment_cache_key(
+                text=txt,
+                voice_name=segment_voice_name,
+                provider_speed=provider_speed,
+                normalizer_signature=normalizer_signature,
+            )
             cache_entry = manifest_segments.get(str(global_idx), {})
             cached_wav = str(cache_entry.get("wav_path", "")).strip()
             cached_key = str(cache_entry.get("cache_key", "")).strip()
@@ -1191,6 +1269,7 @@ class VoiceWorkflow:
                     "text": txt,
                     "voice_name": segment_voice_name,
                     "provider_speed": provider_speed,
+                    "normalizer_signature": normalizer_signature,
                 }
                 manifest_by_cache_key[cache_key] = dict(manifest_segments[str(global_idx)])
                 cache_hits += 1
@@ -1225,6 +1304,7 @@ class VoiceWorkflow:
                         speed=provider_speed,
                         tmp_dir=tmp_dir,
                         on_progress=on_progress,
+                        normalizer_dictionary=normalizer_dictionary,
                     )
                     manifest_segments[str(pending_jobs[0]["global_idx"])] = {
                         "cache_key": str(pending_jobs[0]["cache_key"]),
@@ -1232,6 +1312,7 @@ class VoiceWorkflow:
                         "text": str(pending_jobs[0]["text"]),
                         "voice_name": pending_jobs[0]["voice_name"],
                         "provider_speed": provider_speed,
+                        "normalizer_signature": normalizer_signature,
                     }
                     manifest_by_cache_key[str(pending_jobs[0]["cache_key"])] = dict(manifest_segments[str(pending_jobs[0]["global_idx"])])
                     wavs[int(pending_jobs[0]["idx"])] = str(pending_jobs[0]["wav_path"])
@@ -1265,6 +1346,7 @@ class VoiceWorkflow:
                         speed=provider_speed,
                         tmp_dir=tmp_dir,
                         on_progress=on_progress,
+                        normalizer_dictionary=normalizer_dictionary,
                     ): job
                     for job in pending_jobs
                 }
@@ -1298,6 +1380,7 @@ class VoiceWorkflow:
                         "text": txt,
                         "voice_name": job["voice_name"],
                         "provider_speed": provider_speed,
+                        "normalizer_signature": normalizer_signature,
                     }
                     manifest_by_cache_key[str(job["cache_key"])] = dict(manifest_segments[str(job["global_idx"])])
                     wavs[idx] = seg_wav
@@ -1318,6 +1401,7 @@ class VoiceWorkflow:
         voice_speed: float = 1.0,
         index_offset: int = 0,
         on_progress: callable = None,
+        normalizer_dictionary=None,
         quiet: bool = False,
     ) -> list[str]:
         os.makedirs(tmp_dir, exist_ok=True)
@@ -1329,6 +1413,7 @@ class VoiceWorkflow:
             ai_rewrite_dubbing=False,
             source_language="auto",
             style_instruction="",
+            normalizer_dictionary=normalizer_dictionary,
             log=not quiet,
         )
         if not quiet:
@@ -1349,6 +1434,7 @@ class VoiceWorkflow:
             voice_provider=voice_provider,
             on_progress=on_progress,
             index_offset=index_offset,
+            normalizer_dictionary=normalizer_dictionary,
             log=not quiet,
         )
 
@@ -1373,11 +1459,17 @@ class VoiceWorkflow:
     ):
         workflow_started = time.perf_counter()
         state = self._load_state(project_state_path)
+        normalizer_dictionary = self._normalizer_dictionary_from_state(state)
+        normalizer_signature = self._normalizer_signature(normalizer_dictionary)
+        print(
+            "[Voice Workflow] Project normalizer dictionary: "
+            f"entries={sum(len(value) if isinstance(value, list) else 0 for value in normalizer_dictionary.values())}, "
+            f"signature={normalizer_signature}"
+        )
         self._mark_started(state, with_background=bool(background_path))
         try:
             import tts_processor
-            tts_processor._VIETNAMESE_NORMALIZER = None
-            tts_processor._VIETNAMESE_NORMALIZER_DATA_DIR = ""
+            tts_processor.reset_vietnamese_normalizer_cache()
         except Exception:
             pass
         audio_mode_key = str(audio_handling_mode or "fast").strip().lower()
@@ -1393,6 +1485,7 @@ class VoiceWorkflow:
             ai_rewrite_dubbing=bool(ai_rewrite_dubbing),
             source_language=source_language,
             style_instruction=dubbing_style_instruction,
+            normalizer_dictionary=normalizer_dictionary,
         )
         provider_speed = self._provider_native_speed(
             provider=voice_provider,
@@ -1412,6 +1505,7 @@ class VoiceWorkflow:
             provider_speed=provider_speed,
             voice_provider=voice_provider,
             on_progress=on_progress,
+            normalizer_dictionary=normalizer_dictionary,
         )
         self._update_manifest_entries(
             tmp_dir=tmp_dir,
@@ -1419,6 +1513,7 @@ class VoiceWorkflow:
             wavs=wavs,
             voice_name=voice_name,
             provider_speed=provider_speed,
+            normalizer_signature=normalizer_signature,
         )
         self._save_pre_speed_ratios(segments=segments, wavs=wavs)
         wavs = self._apply_safe_timing_polish(

@@ -17,6 +17,15 @@ from runtime_paths import bin_path, subprocess_hidden_kwargs
 from services import EngineRuntime, ResourceDownloadService
 
 
+def _normalizer_signature(dictionary) -> str:
+    """Return the project pronunciation dictionary cache fingerprint."""
+    try:
+        from tts_processor import normalizer_dictionary_fingerprint
+        return normalizer_dictionary_fingerprint(dictionary)
+    except Exception:
+        return ""
+
+
 class VocalSeparationWorker(QThread):
     finished = Signal(str, str, str)
 
@@ -865,7 +874,7 @@ class FinalExportWorker(QThread):
 class SegmentAudioPreviewWorker(QThread):
     finished = Signal(int, str, str)
 
-    def __init__(self, workspace_root, index, text, voice_name, voice_speed, temp_dir="", cache_temp_dir=""):
+    def __init__(self, workspace_root, index, text, voice_name, voice_speed, temp_dir="", cache_temp_dir="", normalizer_dictionary=None):
         super().__init__()
         self.workspace_root = workspace_root
         self.index = index
@@ -874,6 +883,7 @@ class SegmentAudioPreviewWorker(QThread):
         self.voice_speed = voice_speed
         self.temp_dir = temp_dir
         self.cache_temp_dir = cache_temp_dir
+        self.normalizer_dictionary = dict(normalizer_dictionary or {})
 
     def run(self):
         try:
@@ -910,6 +920,7 @@ class SegmentAudioPreviewWorker(QThread):
                 voice=self.voice_name,
                 speed=provider_speed,
                 tmp_dir=cache_temp_dir,
+                normalizer_dictionary=self.normalizer_dictionary,
             )
 
             manifest = load_manifest(cache_temp_dir)
@@ -919,6 +930,7 @@ class SegmentAudioPreviewWorker(QThread):
                 text=self.text,
                 voice_name=self.voice_name,
                 provider_speed=provider_speed,
+                normalizer_signature=_normalizer_signature(self.normalizer_dictionary),
             )
             manifest_entry = {
                 "cache_key": cache_key,
@@ -952,19 +964,22 @@ class VoiceSamplePreviewWorker(QThread):
     finished = Signal(str, str)
     progress = Signal(str)
 
-    def __init__(self, workspace_root, text, voice_name, voice_speed, temp_dir=""):
+    def __init__(self, workspace_root, text, voice_name, voice_speed, temp_dir="", normalizer_dictionary=None):
         super().__init__()
         self.workspace_root = workspace_root
         self.text = text
         self.voice_name = voice_name
         self.voice_speed = voice_speed
         self.temp_dir = temp_dir
+        self.normalizer_dictionary = dict(normalizer_dictionary or {})
 
     def run(self):
         try:
             temp_dir = self.temp_dir or os.path.join(self.workspace_root, "temp", "voice_sample_preview")
             os.makedirs(temp_dir, exist_ok=True)
-            cache_seed = f"{self.voice_name}|{self.voice_speed}|{self.text}".encode("utf-8", errors="replace")
+            cache_seed = (
+                f"{self.voice_name}|{self.voice_speed}|{_normalizer_signature(self.normalizer_dictionary)}|{self.text}"
+            ).encode("utf-8", errors="replace")
             cache_key = hashlib.sha1(cache_seed).hexdigest()[:16]
             wav_path = os.path.join(temp_dir, f"voice_sample_{cache_key}.wav")
             base_wav_path = os.path.join(temp_dir, f"voice_sample_{cache_key}_base.wav")
@@ -988,6 +1003,7 @@ class VoiceSamplePreviewWorker(QThread):
                 speed=1.0,
                 tmp_dir=temp_dir,
                 on_progress=self.progress.emit,
+                normalizer_dictionary=self.normalizer_dictionary,
             )
             if not self._is_preview_audio_usable(staging_base_wav_path):
                 raise RuntimeError("Generated voice preview audio is empty or invalid.")

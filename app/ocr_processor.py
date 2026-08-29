@@ -77,6 +77,25 @@ def _enable_reusable_detector_preprocess(engine):
 MAX_CROP_WIDTH = 960
 EMPTY_TOLERANCE = 2
 EXACT_HASH_THRESHOLD = 5.0
+_OCR_MODEL_SETS = (
+    (
+        "PP-OCRv4",
+        (
+            "ch_PP-OCRv4_det_mobile.onnx",
+            "ch_PP-OCRv4_rec_mobile.onnx",
+            "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+            "ppocr_keys_v1.txt",
+        ),
+    ),
+    (
+        "PP-OCRv6",
+        (
+            "PP-OCRv6_det_small.onnx",
+            "PP-OCRv6_rec_small.onnx",
+            "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+        ),
+    ),
+)
 _OCR_HANDLE_RE = re.compile(r"@\s*[A-Za-z0-9_\-\u3400-\u9fff]{1,24}")
 _OCR_WATERMARK_PATTERNS = [
     re.compile(r"[\u3400-\u9fff]{1,6}漫(?:剧|居|刷)"),
@@ -124,6 +143,14 @@ def _ffmpeg_path():
     return os.path.join(bin_path("ffmpeg"), "ffmpeg.exe")
 
 
+def _ocr_model_variant(model_dir):
+    """Return the complete PP-OCR model family installed in ``model_dir``."""
+    for variant, required_files in _OCR_MODEL_SETS:
+        if all(os.path.isfile(os.path.join(model_dir, name)) for name in required_files):
+            return variant
+    return ""
+
+
 def _load_ocr_engine():
     global _OCR_ENGINE
     with _get_lock():
@@ -140,39 +167,44 @@ def _load_ocr_engine():
                     pass
             os.environ["PATH"] = cuda_bin + os.pathsep + os.environ.get("PATH", "")
 
+        # PyInstaller one-dir builds place collected data below _internal,
+        # while source installs keep it beside rapidocr.__file__.  A user may
+        # also download the model files into the writable application root.
+        # Prefer a complete directory so an empty placeholder never shadows a
+        # complete bundled copy.
         try:
             import rapidocr
-            models_dir = os.path.join(os.path.dirname(rapidocr.__file__), "models")
+            package_models_dir = os.path.join(os.path.dirname(rapidocr.__file__), "models")
         except Exception:
-            models_dir = ""
-
-        # PyInstaller one-dir builds place collected data below _internal,
-        # while source installs keep it beside rapidocr.__file__. Resolve both.
+            package_models_dir = ""
         import sys
-        candidates = [models_dir]
+        candidates = []
+        try:
+            from runtime_paths import bundle_root, join_root
+            candidates.append(join_root("rapidocr", "models"))
+            candidates.append(join_root("models", "rapidocr", "models"))
+        except Exception:
+            pass
+        candidates.append(package_models_dir)
         meipass = getattr(sys, "_MEIPASS", "") or ""
         if meipass:
             candidates.append(os.path.join(meipass, "rapidocr", "models"))
+            candidates.append(os.path.join(meipass, "models", "rapidocr", "models"))
         try:
-            from runtime_paths import bundle_root
             candidates.append(os.path.join(bundle_root(), "rapidocr", "models"))
+            candidates.append(os.path.join(bundle_root(), "models", "rapidocr", "models"))
         except Exception:
             pass
-        models_dir = next((path for path in candidates if path and os.path.isdir(path)), "")
+        candidates = [path for path in candidates if path]
+        models_dir = next((path for path in candidates if _ocr_model_variant(path)), "")
         print(f"[OCR] Model directory: {models_dir or '<not found>'}")
 
-        required_models = [
-            "ch_PP-OCRv4_det_mobile.onnx",
-            "ch_PP-OCRv4_rec_mobile.onnx",
-            "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
-        ]
-        missing = [m for m in required_models if not models_dir or not os.path.isfile(os.path.join(models_dir, m))]
-        if missing:
+        variant = _ocr_model_variant(models_dir) if models_dir else ""
+        if not variant:
             raise RuntimeError(
-                "OCR models not found inside the rapidocr package. "
-                "Reinstall the rapidocr package or open Settings → Manage Resources for hints.\n\n"
-                f"Missing: {', '.join(missing)}\n"
-                f"Looked in: {models_dir or 'rapidocr package directory'}"
+                "RapidOCR model files were not found. Install a complete PP-OCRv4 "
+                "or PP-OCRv6 model set, then open Settings → Manage Resources.\n\n"
+                f"Looked in: {', '.join(candidates) or 'rapidocr package directory'}"
             )
 
         from rapidocr import RapidOCR
@@ -184,6 +216,15 @@ def _load_ocr_engine():
             "Global.log_level": "error",
             "Global.model_root_dir": models_dir,
         }
+        if variant == "PP-OCRv4":
+            # RapidOCR 3.x defaults to PP-OCRv6.  Select the legacy model
+            # files explicitly when the user downloads the PP-OCRv4 pack.
+            base_params.update({
+                "Det.model_path": os.path.join(models_dir, "ch_PP-OCRv4_det_mobile.onnx"),
+                "Rec.model_path": os.path.join(models_dir, "ch_PP-OCRv4_rec_mobile.onnx"),
+                "Rec.rec_keys_path": os.path.join(models_dir, "ppocr_keys_v1.txt"),
+                "Cls.model_path": os.path.join(models_dir, "ch_ppocr_mobile_v2.0_cls_mobile.onnx"),
+            })
         cuda_ready, cuda_reason = _onnx_cuda_provider_ready()
         if cuda_ready:
             try:
@@ -191,16 +232,16 @@ def _load_ocr_engine():
                     **base_params,
                     "EngineConfig.onnxruntime.use_cuda": True,
                 })
-                print("[OCR] RapidOCR engine loaded (PP-OCRv4 ONNX, CUDA GPU)")
+                print(f"[OCR] RapidOCR engine loaded ({variant} ONNX, CUDA GPU)")
             except Exception as exc:
                 # This covers a genuine RapidOCR initialization failure after
                 # the provider itself loaded successfully.
                 _OCR_ENGINE = RapidOCR(params=base_params)
-                print(f"[OCR] CUDA initialization failed; using CPU: {exc}")
+                print(f"[OCR] CUDA initialization failed; using CPU ({variant}): {exc}")
         else:
             _OCR_ENGINE = RapidOCR(params=base_params)
             detail = f" ({cuda_reason})" if cuda_reason else ""
-            print(f"[OCR] CUDA unavailable; using CPU OCR{detail}")
+            print(f"[OCR] CUDA unavailable; using CPU OCR ({variant}){detail}")
         _enable_reusable_detector_preprocess(_OCR_ENGINE)
         return _OCR_ENGINE
 

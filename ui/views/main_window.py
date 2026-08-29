@@ -129,10 +129,6 @@ def _build_header_bar(gui):
     gui.exit_project_action.triggered.connect(gui.exit_to_launcher)
     gui.settings_action = more_menu.addAction("Settings")
     gui.settings_action.triggered.connect(gui.open_model_settings_dialog)
-    more_menu.addSeparator()
-    gui.normalizer_dict_action = more_menu.addAction("Normalizer Dictionary")
-    gui.normalizer_dict_action.triggered.connect(gui.open_normalizer_dict_dialog)
-
     gui.more_actions_btn.setMenu(more_menu)
     layout.addWidget(gui.more_actions_btn)
     layout.addSpacing(12)
@@ -206,6 +202,8 @@ def _connect_ui_signals(gui):
     gui.translate_btn.clicked.connect(gui.run_translation)
     gui.rewrite_translation_btn.clicked.connect(gui.run_rewrite_translation)
     gui.import_translation_btn.clicked.connect(gui.import_translated_srt)
+    if hasattr(gui, "normalizer_dict_btn"):
+        gui.normalizer_dict_btn.clicked.connect(gui.open_normalizer_dict_dialog)
     gui.preview_btn.clicked.connect(gui.preview_video)
     if hasattr(gui, "reset_framing_btn"):
         gui.reset_framing_btn.clicked.connect(gui.reset_preview_framing)
