@@ -959,8 +959,8 @@ class LauncherWindow(QDialog):
         <h3 style='color:#8ad7ff;'>Description</h3>
         <p>CapCap is a Windows application that supports both CPU and GPU processing.</p>
         <p>GPU mode provides the best overall experience and performance. GPU acceleration currently supports NVIDIA GPUs.</p>
-        <p>If CUDA is not detected correctly, first update your NVIDIA GPU driver. If needed, install CUDA 12.4 from:<br>
-        <a href='https://developer.nvidia.com/cuda-12-4-0-download-archive'>CUDA 12.4 Download Archive</a></p>
+        <p>If CUDA is not detected correctly, first update your NVIDIA GPU driver. If needed, install CUDA 12.8 from:<br>
+        <a href='https://developer.nvidia.com/cuda-12-8-0-download-archive'>CUDA 12.8 Download Archive</a></p>
 
         <h3 style='color:#8ad7ff;'>Tutorial / Resource Setup</h3>
         <p>Download the resource, then place it in the matching CapCap folder:</p>
@@ -969,7 +969,7 @@ class LauncherWindow(QDialog):
         <tr><td><b>CUDA / cuDNN runtime</b></td><td><code>CapCap\\bin\\cuda12_fw</code></td></tr>
         <tr><td><b>SenseVoice</b></td><td>Bundled by default in <code>CapCap\\models\\sensevoice</code></td></tr>
         <tr><td><b>RapidOCR models</b></td><td>Bundled by default; optional files use <code>CapCap\\rapidocr\\models</code></td></tr>
-        <tr><td><b>Piper voices</b></td><td><code>CapCap\\models\\piper</code> (Vietnamese) or <code>CapCap\\models\\piper-en</code> (English)</td></tr>
+        <tr><td><b>Piper voices</b></td><td><code>CapCap\\models\\piper</code> (Vietnamese: shared <code>config.json</code>) or <code>CapCap\\models\\piper-en</code> (English)</td></tr>
         <tr><td><b>Speaker Detection</b></td><td><code>CapCap\\models\\pyannote</code></td></tr>
         </table>
         <p>Resource Manager provides download links for supported optional resources. Extract downloaded archives into the folder shown above.</p>

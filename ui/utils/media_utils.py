@@ -240,6 +240,17 @@ def _apply_audio_fade(gui, position_ms: int):
     if duration_ms <= 0:
         return
     pos_s = position_ms / 1000.0
+    # When a Music Layer exists, the dubbed sidecar is a composed render of
+    # TTS + music.  Its per-track levels have already been baked into the WAV
+    # by the shared mixer.  Applying the TS1 slider/fade to the whole sidecar
+    # would therefore mute the music when TS1 is set to 0% (and attenuate it
+    # at every other TS1 value).
+    has_composed_dubbed_sidecar = False
+    try:
+        has_composed_dubbed_sidecar = bool(gui._music_audio_tracks())
+    except Exception:
+        has_composed_dubbed_sidecar = False
+
     for track_name in ("A1 Audio", "TS1"):
         track, _ = _find_audio_track(gui, track_name)
         if track is None:
@@ -265,7 +276,10 @@ def _apply_audio_fade(gui, position_ms: int):
                 gui.media_player.set_original_volume(effective)
         elif track_name == "TS1":
             if hasattr(gui.media_player, "set_dubbed_volume"):
-                gui.media_player.set_dubbed_volume(effective)
+                if has_composed_dubbed_sidecar:
+                    gui.media_player.set_dubbed_volume(100.0)
+                else:
+                    gui.media_player.set_dubbed_volume(effective)
 
 
 def _find_audio_track(gui, name: str):

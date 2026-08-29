@@ -22,7 +22,10 @@ datas = [
     (str(project_root / "app" / "voice_preview_catalog.release.json"), "app"),
     (str(project_root / "app" / "translation" / "prompts"), "app/translation/prompts"),
     (str(project_root / "models" / "piper" / "ngochuyen.onnx"), "models/piper"),
-    (str(project_root / "models" / "piper" / "ngochuyen.onnx.json"), "models/piper"),
+    # piper-new uses one shared config/voice manifest for all Vietnamese
+    # models; PiperVoice receives this config explicitly at runtime.
+    (str(project_root / "models" / "piper" / "config.json"), "models/piper"),
+    (str(project_root / "models" / "piper" / "voices.json"), "models/piper"),
     (str(project_root / "models" / "pyannote" / "model.int8.onnx"), "models/pyannote"),
     (str(project_root / "models" / "pyannote" / "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"), "models/pyannote"),
     (str(project_root / "models" / "pyannote" / "LICENSE"), "models/pyannote"),
@@ -45,6 +48,10 @@ datas = [
     (str(project_root / "ui" / "views" / "editor"), "views/editor"),
 ]
 datas += collect_data_files("piper")
+# The normalizer package ships its built-in CSV rules as package data.  Keep
+# them in the frozen build; project dictionaries are stored separately in
+# each project's state.json and are not bundled.
+datas += collect_data_files("vietnormalizer")
 
 # RapidOCR selects its ONNX implementation through runtime configuration.
 # Listing only ``rapidocr`` misses these dynamically imported modules in a
@@ -147,6 +154,12 @@ a = Analysis(
         "dotenv",
         "huggingface_hub",
         "tts_processor",
+        "vietnormalizer",
+        "vietnormalizer.normalizer",
+        "vietnormalizer.processor",
+        "vietnormalizer.transliterator",
+        "vietnormalizer.detector",
+        "vietnormalizer.data",
         "preview_processor",
         "video_processor",
         "subtitle_builder",

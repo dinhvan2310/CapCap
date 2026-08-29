@@ -291,12 +291,16 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
         fd, temp_wav_path = tempfile.mkstemp(prefix="tts_", suffix=".wav", dir=tmp_dir)
         os.close(fd)
         try:
+            normalizer_dictionary = payload.get("normalizer_dictionary")
+            if not isinstance(normalizer_dictionary, dict):
+                normalizer_dictionary = {}
             synthesize_text_to_wav_16k_mono(
                 text=text,
                 wav_path=temp_wav_path,
                 voice=voice,
                 speed=speed,
                 tmp_dir=tmp_dir,
+                normalizer_dictionary=normalizer_dictionary,
             )
             with open(temp_wav_path, "rb") as handle:
                 audio_b64 = base64.b64encode(handle.read()).decode("ascii")

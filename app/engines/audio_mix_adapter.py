@@ -1,4 +1,12 @@
-from audio_mixer import build_voice_track_from_srt_segments, change_wav_speed, fit_wav_to_duration, mix_voice_with_background, mix_original_with_dub, trim_trailing_silence
+from audio_mixer import (
+    build_voice_track_from_srt_segments,
+    change_wav_speed,
+    fit_wav_to_duration,
+    mix_voice_with_background,
+    mix_original_with_dub,
+    mix_audio_tracks,
+    trim_trailing_silence,
+)
 
 
 class AudioMixAdapter:
@@ -95,4 +103,19 @@ class AudioMixAdapter:
             output_wav_path=output_wav_path,
             original_gain_db=original_gain_db,
             dub_gain_db=dub_gain_db,
+        )
+
+    def mix_audio_tracks(
+        self,
+        *,
+        tracks,
+        output_wav_path: str,
+        total_duration_ms: int | None = None,
+        sample_rate: int = 16000,
+    ) -> str:
+        return mix_audio_tracks(
+            tracks=tracks,
+            output_wav_path=output_wav_path,
+            total_duration_ms=total_duration_ms,
+            sample_rate=sample_rate,
         )

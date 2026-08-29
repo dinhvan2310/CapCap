@@ -11,6 +11,7 @@ class TTSAdapter:
         speed: float = 1.0,
         tmp_dir: str | None = None,
         on_progress: callable = None,
+        normalizer_dictionary=None,
     ) -> str:
         return synthesize_text_to_wav_16k_mono(
             text=text,
@@ -19,4 +20,5 @@ class TTSAdapter:
             speed=speed,
             tmp_dir=tmp_dir,
             on_progress=on_progress,
+            normalizer_dictionary=normalizer_dictionary,
         )

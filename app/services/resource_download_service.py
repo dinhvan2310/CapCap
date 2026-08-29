@@ -7,6 +7,9 @@ import subprocess
 import threading
 import time
 import uuid
+import urllib.request
+import zipfile
+import tarfile
 from pathlib import Path
 
 from runtime_paths import app_path, bin_path, bundle_root, join_root, models_path, subprocess_hidden_kwargs, subprocess_text_kwargs
@@ -25,6 +28,47 @@ class ResourceDownloadService:
         "SENSEVOICE_MODEL_REPO",
         "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
     ).strip() or "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
+    # Keep the accepted model sets here (instead of relying only on the
+    # Python package's import) so a packaged build can recover missing model
+    # data through Manage Resources.
+    # Resource packs built for older RapidOCR releases contain PP-OCRv4
+    # files, while current RapidOCR wheels bundle PP-OCRv6 files.  Both are
+    # valid model sets; checking one fixed filename list made a working
+    # bundled installation appear as "Missing" in Manage Resources.
+    _OCR_MODEL_SETS = (
+        (
+            "PP-OCRv4",
+            (
+                "ch_PP-OCRv4_det_mobile.onnx",
+                "ch_PP-OCRv4_rec_mobile.onnx",
+                "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+                "ppocr_keys_v1.txt",
+            ),
+        ),
+        (
+            "PP-OCRv6",
+            (
+                "PP-OCRv6_det_small.onnx",
+                "PP-OCRv6_rec_small.onnx",
+                "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+            ),
+        ),
+    )
+    # Keep this alias for the download branch, which intentionally downloads
+    # the compact PP-OCRv4 pack from the CapCap resource repository.
+    _OCR_REQUIRED_MODELS = _OCR_MODEL_SETS[0][1]
+    _AUTO_DOWNLOAD_IDS = {
+        "whisper:base",
+        "whisper:small",
+        "whisper:medium",
+        "sensevoice:model",
+        "ocr:engine",
+        "cuda:whisper",
+        "diarization:segmentation",
+        "diarization:embedding",
+        "voice:pack",
+        "voice:pack-en",
+    }
 
     def __init__(self, workspace_root: str):
         self.workspace_root = workspace_root
@@ -66,7 +110,24 @@ class ResourceDownloadService:
             model_path = models_path(*Path(relative).parts)
         else:
             model_path = models_path("piper", os.path.basename(normalized))
-        config_path = f"{model_path}.json"
+        # Piper's legacy packs keep one JSON file beside every ONNX model,
+        # while the current piper-new Vietnamese pack keeps one shared
+        # config.json in models/piper.  Prefer the legacy file when present,
+        # then fall back to the shared directory config.
+        legacy_config = f"{model_path}.json"
+        model_dir_name = os.path.basename(os.path.dirname(model_path)) or "piper"
+        shared_config = models_path(model_dir_name, "config.json")
+        if model_dir_name.lower() == "piper" and os.path.isfile(shared_config):
+            config_path = shared_config
+        elif os.path.isfile(legacy_config):
+            config_path = legacy_config
+        elif model_dir_name.lower() == "piper" or os.path.isfile(shared_config):
+            # piper-new uses this shared path even before config.json has
+            # been downloaded; returning the expected target lets an
+            # individual voice download place it correctly.
+            config_path = shared_config
+        else:
+            config_path = legacy_config
         return (
             model_path,
             config_path,
@@ -80,9 +141,17 @@ class ResourceDownloadService:
             remote_model = remote_model[len("models/"):]
         if not remote_model:
             remote_model = f"piper/{model_name}"
+        # Vietnamese voices in the new resource pack live directly under
+        # piper-new and all use its single shared config.json.  Keep the
+        # existing piper-en archive layout for English voices.
+        if remote_model.startswith("piper/") and not remote_model.startswith("piper-en/"):
+            remote_model = f"piper-new/{model_name}"
+            remote_config = "piper-new/config.json"
+        else:
+            remote_config = f"{remote_model}.json"
         return (
             remote_model,
-            f"{remote_model}.json",
+            remote_config,
         )
 
     def _finalize_voice_download(self, downloaded_path: str, voice_entry: dict, *, is_config: bool) -> str:
@@ -90,7 +159,24 @@ class ResourceDownloadService:
         if not source_path or not os.path.exists(source_path):
             return source_path
         model_path, config_path = self._voice_local_paths(voice_entry)
-        target_path = config_path if is_config else model_path
+        # Never write a downloaded voice into PyInstaller's read-only
+        # _internal directory.  Resolve a deterministic writable destination
+        # from the catalog path, including the shared piper-new config.
+        provider_voice = str(voice_entry.get("provider_voice", "")).strip().replace("\\", "/")
+        relative_voice = provider_voice[len("models/"):] if provider_voice.startswith("models/") else ""
+        if relative_voice.startswith(("piper/", "piper-en/")):
+            relative_parts = Path(relative_voice).parts
+            writable_model = join_root("models", *relative_parts)
+            if is_config:
+                target_path = (
+                    join_root("models", "piper", "config.json")
+                    if relative_voice.startswith("piper/")
+                    else f"{writable_model}.json"
+                )
+            else:
+                target_path = writable_model
+        else:
+            target_path = config_path if is_config else model_path
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
         normalized_source = os.path.normcase(os.path.abspath(source_path))
         normalized_target = os.path.normcase(os.path.abspath(target_path))
@@ -189,6 +275,7 @@ class ResourceDownloadService:
     def _piper_voice_entries(self, language: str = "") -> list[dict]:
         payload = self._read_catalog()
         items: list[dict] = []
+        known_ids: set[str] = set()
         language = str(language or "").strip().lower()
         for voice in payload.get("voices", []) or []:
             if not isinstance(voice, dict):
@@ -198,30 +285,68 @@ class ResourceDownloadService:
             voice_id = str(voice.get("id", "")).strip()
             if not voice_id:
                 continue
+            known_ids.add(voice_id)
             voice_language = str(voice.get("language", "")).strip().lower().split("-", 1)[0]
             if language and voice_language != language:
                 continue
             items.append(voice)
+
+        # The packaged catalog may be read-only and may predate additional
+        # models listed by the shared piper-new manifest. Add those entries
+        # in memory so resource checks and voice validation see the same set
+        # as the UI voice selector.
+        manifest_path = models_path("piper", "voices.json")
+        if os.path.isfile(manifest_path):
+            try:
+                with open(manifest_path, "r", encoding="utf-8-sig") as handle:
+                    manifest = json.load(handle)
+            except Exception:
+                manifest = []
+            if isinstance(manifest, list):
+                for metadata in manifest:
+                    if not isinstance(metadata, dict):
+                        continue
+                    audio_path = str(metadata.get("audio_path", "") or "").replace("\\", "/").strip()
+                    filename = os.path.basename(audio_path)
+                    voice_id = os.path.splitext(filename)[0]
+                    if not voice_id or voice_id in known_ids:
+                        continue
+                    model_path = models_path("piper", filename)
+                    if not os.path.isfile(model_path) or os.path.getsize(model_path) <= 0:
+                        continue
+                    manifest_entry = {
+                        "id": voice_id,
+                        "name": str(metadata.get("name", "") or "").strip() or voice_id,
+                        "provider": "piper",
+                        "provider_voice": f"models/piper/{filename}",
+                        "language": "vi",
+                        "gender": str(metadata.get("gender", "") or "").strip(),
+                        "tier": "free",
+                        "enabled": True,
+                        "tags": ["local", "piper"],
+                    }
+                    if str(metadata.get("description", "") or "").strip():
+                        manifest_entry["description"] = str(metadata.get("description")).strip()
+                    known_ids.add(voice_id)
+                    voice_language = "vi"
+                    if not language or voice_language == language:
+                        items.append(manifest_entry)
         return items
 
     def _voice_pack_status(self, language: str = "") -> str:
-        entries = self._piper_voice_entries(language)
-        if not entries:
-            return "missing"
-        installed = sum(1 for entry in entries if self.is_resource_installed(f"voice:{str(entry.get('id', '')).strip()}"))
-        if installed <= 0:
-            return "missing"
-        if installed >= len(entries):
-            return "installed"
-        return "partial"
+        available_count = self._usable_piper_voice_count(language)
+        # Piper resources are intentionally treated as an available-voice
+        # count rather than a fixed completeness checklist. Users may install
+        # any subset of piper-new or add custom voices.
+        return "installed" if available_count else "missing"
 
     def _usable_piper_voice_count(self, language: str = "") -> int:
         """Count local Piper voices that can actually be loaded.
 
         Resource-pack completeness is not meaningful to users: they may
         intentionally install only a subset or add their own voices. A voice
-        is usable when its ONNX model and matching JSON config are both
-        present in the language's storage folder.
+        is usable when its ONNX model and either a matching per-model JSON
+        config or a shared directory config are present.
         """
         normalized_language = str(language or "").strip().lower().split("-", 1)[0]
         folder_name = "piper-en" if normalized_language == "en" else "piper"
@@ -229,6 +354,15 @@ class ResourceDownloadService:
             os.path.join(self.workspace_root, "models", folder_name),
             os.path.join(bundle_root(), "models", folder_name),
         ]
+        # A pack can be split between the writable install directory and the
+        # read-only PyInstaller bundle.  A shared config from either root is
+        # valid for every model in that language folder.
+        shared_configs = {
+            str(Path(root) / "config.json")
+            for root in roots
+            if os.path.isfile(os.path.join(root, "config.json"))
+            and os.path.getsize(os.path.join(root, "config.json")) > 0
+        }
         seen_names: set[str] = set()
         for root in roots:
             if not os.path.isdir(root):
@@ -238,7 +372,9 @@ class ResourceDownloadService:
                     if not model_path.is_file() or model_path.stat().st_size <= 0:
                         continue
                     config_path = Path(f"{model_path}.json")
-                    if not config_path.is_file() or config_path.stat().st_size <= 0:
+                    has_legacy_config = config_path.is_file() and config_path.stat().st_size > 0
+                    has_shared_config = bool(shared_configs)
+                    if not has_legacy_config and not has_shared_config:
                         continue
                     seen_names.add(str(model_path.name).lower())
             except OSError:
@@ -263,6 +399,34 @@ class ResourceDownloadService:
             "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
         )
 
+    def _sensevoice_model_dir(self) -> str:
+        """Return a SenseVoice directory that contains a complete model.
+
+        ``models_path()`` intentionally prefers the writable application
+        directory.  A packaged build also creates an empty
+        ``models/sensevoice`` folder for manual downloads, though, and that
+        empty folder used to shadow the bundled model below ``_internal``.
+        Prefer a directory containing both required files and only fall back
+        to the first existing directory when the resource is incomplete so
+        diagnostics still point at a useful location.
+        """
+        candidates = [
+            os.path.join(self.workspace_root, "models", "sensevoice"),
+            os.path.join(bundle_root(), "models", "sensevoice"),
+        ]
+        complete = []
+        for candidate in candidates:
+            if not os.path.isdir(candidate):
+                continue
+            if all(os.path.isfile(os.path.join(candidate, name)) for name in ("model.int8.onnx", "tokens.txt")):
+                complete.append(candidate)
+        if complete:
+            return complete[0]
+        for candidate in candidates:
+            if os.path.isdir(candidate):
+                return candidate
+        return candidates[0]
+
     def _whisper_cache_dirs(self, model_name: str) -> list[str]:
         root = Path(self._whisper_cache_root())
         if not root.exists():
@@ -280,28 +444,32 @@ class ResourceDownloadService:
                 matches.append(str(child))
         return matches
 
-    _OCR_REQUIRED_MODELS = [
-        "ch_PP-OCRv4_det_mobile.onnx",
-        "ch_PP-OCRv4_rec_mobile.onnx",
-        "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
-        "ppocr_keys_v1.txt",
-    ]
-
     def _ocr_model_dir(self) -> str:
         # Do not make a lightweight availability check depend on importing the
         # entire RapidOCR runtime. In a frozen build a missing lazy submodule
         # used to turn an import exception into the misleading message
         # "Rapid OCR engine missing", even when all bundled models existed.
         candidates = [
-            os.path.join(bundle_root(), "rapidocr"),
+            # Current writable download location.
             os.path.join(self.workspace_root, "rapidocr"),
+            # Older builds/documentation used models/rapidocr.
+            os.path.join(self.workspace_root, "models", "rapidocr"),
+            os.path.join(bundle_root(), "rapidocr"),
+            os.path.join(bundle_root(), "models", "rapidocr"),
         ]
         import sys
         meipass = getattr(sys, "_MEIPASS", "") or ""
         if meipass:
             candidates.append(os.path.join(meipass, "rapidocr"))
+            candidates.append(os.path.join(meipass, "models", "rapidocr"))
+        first_model_dir = ""
         for candidate in candidates:
-            if os.path.isdir(os.path.join(candidate, "models")):
+            model_dir = os.path.join(candidate, "models")
+            if not os.path.isdir(model_dir):
+                continue
+            if not first_model_dir:
+                first_model_dir = candidate
+            if self._ocr_model_variant(model_dir):
                 return candidate
         try:
             import rapidocr
@@ -310,6 +478,14 @@ class ResourceDownloadService:
                 return models_dir
         except Exception:
             pass
+        return first_model_dir
+
+    @classmethod
+    def _ocr_model_variant(cls, model_dir: str) -> str:
+        """Return the installed PP-OCR model family, or an empty string."""
+        for variant, required_files in cls._OCR_MODEL_SETS:
+            if all(os.path.isfile(os.path.join(model_dir, name)) for name in required_files):
+                return variant
         return ""
 
     def _ocr_model_status(self) -> str:
@@ -317,11 +493,7 @@ class ResourceDownloadService:
         if not models_dir:
             return "missing"
         models_path_dir = os.path.join(models_dir, "models")
-        missing = [
-            m for m in self._OCR_REQUIRED_MODELS
-            if not os.path.isfile(os.path.join(models_path_dir, m))
-        ]
-        return "missing" if missing else "installed"
+        return "installed" if self._ocr_model_variant(models_path_dir) else "missing"
 
     def is_ocr_ready(self) -> bool:
         return self._ocr_model_status() == "installed"
@@ -338,7 +510,7 @@ class ResourceDownloadService:
     def validate_sensevoice_runtime(self) -> list[tuple[str, str]]:
         """Return actionable first-run checks for the bundled default ASR."""
         issues: list[tuple[str, str]] = []
-        model_dir = models_path("sensevoice")
+        model_dir = self._sensevoice_model_dir()
         model_path = os.path.join(model_dir, "model.int8.onnx")
         tokens_path = os.path.join(model_dir, "tokens.txt")
         if not os.path.isfile(model_path):
@@ -468,6 +640,11 @@ class ResourceDownloadService:
             ("nvidia_driver", "NVIDIA driver"),
         ]
 
+    def supports_auto_download(self, resource_id: str) -> bool:
+        """Whether Manage Resources can download this resource directly."""
+        rid = str(resource_id or "").strip()
+        return rid in self._AUTO_DOWNLOAD_IDS
+
     def is_requirement_met(self, requirement_id: str) -> bool:
         rid = str(requirement_id or "").strip()
         if rid == "ocr":
@@ -498,10 +675,10 @@ class ResourceDownloadService:
                 "name": "Whisper Base",
                 "kind": "whisper_cpu",
                 "status": "installed" if self.is_resource_installed("whisper:base") else "missing",
-                "target_dir": self._whisper_cache_root(),
-                "download_url": "https://huggingface.co/Hacht/CapCapResource/blob/main/zipResource/models--Systran--faster-whisper-base.zip",
+                "target_dir": join_root("models", "faster_whisper"),
+                "download_url": self._hf_blob_url("zipResource/models--Systran--faster-whisper-base.zip"),
                 "expected_filename": self.WHISPER_ZIP_FILES["base"],
-                "auto_download_supported": False,
+                "auto_download_supported": True,
                 "description": "Speech-recognition model for CPU transcription.",
             },
             {
@@ -509,10 +686,10 @@ class ResourceDownloadService:
                 "name": "Whisper Small",
                 "kind": "whisper_cpu",
                 "status": "installed" if self.is_resource_installed("whisper:small") else "missing",
-                "target_dir": self._whisper_cache_root(),
-                "download_url": "https://huggingface.co/Hacht/CapCapResource/blob/main/zipResource/models--Systran--faster-whisper-small.zip",
+                "target_dir": join_root("models", "faster_whisper"),
+                "download_url": self._hf_blob_url("zipResource/models--Systran--faster-whisper-small.zip"),
                 "expected_filename": self.WHISPER_ZIP_FILES["small"],
-                "auto_download_supported": False,
+                "auto_download_supported": True,
                 "description": "Faster speech-recognition model for CPU transcription.",
             },
             {
@@ -520,15 +697,15 @@ class ResourceDownloadService:
                 "name": "Whisper Medium",
                 "kind": "whisper",
                 "status": "installed" if self.is_resource_installed("whisper:medium") else "missing",
-                "target_dir": self._whisper_cache_root(),
+                "target_dir": join_root("models", "faster_whisper"),
                 "download_url": self._hf_blob_url("zipResource/models--Systran--faster-whisper-medium.zip"),
                 "expected_filename": "models--Systran--faster-whisper-medium.zip",
-                "auto_download_supported": False,
+                "auto_download_supported": True,
                 "description": "Speech-recognition model used to create the original transcript.",
             },
             {
                 "id": "cuda:whisper",
-                "name": "GPU Acceleration Pack (CUDA 12, ~1.6 GB)",
+                "name": "GPU Acceleration Pack (CUDA 12.8, ~1.6 GB)",
                 "kind": "cuda",
                 "required_for": "GPU Mode",
                 "status": "installed" if self.is_resource_installed("cuda:whisper") else "missing",
@@ -536,17 +713,51 @@ class ResourceDownloadService:
                 "download_url": self._hf_blob_url("zipResource/cuda12_fw.zip"),
                 "expected_filename": "cuda12_fw.zip",
                 "auto_download_supported": True,
-                "description": "Required for GPU Mode. Provides the CUDA runtime used to accelerate supported local processing.",
+                "description": "Required for GPU Mode. Provides the CUDA 12.8 runtime used to accelerate supported local processing.",
+            },
+            {
+                "id": "sensevoice:model",
+                "name": "SenseVoice ASR Model (Sherpa-ONNX)",
+                "kind": "sensevoice",
+                "status": "installed" if self.is_resource_installed("sensevoice:model") else "missing",
+                # Always point downloads at the writable application folder;
+                # a bundled copy under _internal is read-only and should not
+                # be overwritten.
+                "target_dir": os.path.join(self.workspace_root, "models", "sensevoice"),
+                "download_url": self._hf_blob_url("zipResource/sensevoice.zip"),
+                "expected_filename": "model.int8.onnx + tokens.txt",
+                "auto_download_supported": True,
+                "description": (
+                    "Optional recovery download for the bundled CPU speech-recognition model. "
+                    "Use this when a packaged build cannot load its bundled SenseVoice files."
+                ),
+            },
+            {
+                "id": "ocr:engine",
+                "name": "RapidOCR Models (PP-OCRv4 / PP-OCRv6)",
+                "kind": "ocr",
+                "status": "installed" if self.is_resource_installed("ocr:engine") else "missing",
+                "target_dir": os.path.join(self.workspace_root, "rapidocr", "models"),
+                "download_url": (
+                    f"https://huggingface.co/{self.repo_id}/tree/{self.revision}/rapidocr/models"
+                ),
+                "expected_filename": "PP-OCRv4 or PP-OCRv6 detector + recognizer + classifier",
+                "auto_download_supported": True,
+                "description": (
+                    "OCR model files used by OCR mode and OCR Translator. A bundled PP-OCRv6 "
+                    "set or the downloadable PP-OCRv4 pack is accepted; the RapidOCR runtime "
+                    "remains bundled with the application."
+                ),
             },
             {
                 "id": "diarization:segmentation",
                 "name": "Speaker Diarization Segmentation (Sherpa-ONNX)",
                 "kind": "diarization",
                 "status": "installed" if self.is_resource_installed("diarization:segmentation") else "missing",
-                "target_dir": self._speaker_diarization_root(),
+                "target_dir": join_root("models", "pyannote"),
                 "download_url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
                 "expected_filename": "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
-                "auto_download_supported": False,
+                "auto_download_supported": True,
                 "description": "ONNX model that detects potential speaker changes.",
             },
             {
@@ -554,10 +765,10 @@ class ResourceDownloadService:
                 "name": "Speaker Diarization Embedding (3D-Speaker)",
                 "kind": "diarization",
                 "status": "installed" if self.is_resource_installed("diarization:embedding") else "missing",
-                "target_dir": self._speaker_diarization_root(),
+                "target_dir": join_root("models", "pyannote"),
                 "download_url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
                 "expected_filename": "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
-                "auto_download_supported": False,
+                "auto_download_supported": True,
                 "description": "ONNX model that identifies and groups speaker voices.",
             },
         ]
@@ -573,11 +784,14 @@ class ResourceDownloadService:
                     "kind": "voice",
                     "status": "installed" if count else "missing",
                     "status_label": f"{count} voice{'s' if count != 1 else ''} available",
-                    "target_dir": models_path("piper"),
-                    "download_url": self._hf_blob_url("zipResource/piper.zip"),
-                    "expected_filename": "piper.zip",
+                    "target_dir": join_root("models", "piper"),
+                    "download_url": f"https://huggingface.co/{self.repo_id}/tree/{self.revision}/piper-new",
+                    "expected_filename": "config.json + voices.json + *.onnx",
                     "auto_download_supported": True,
-                    "description": "Offline Vietnamese voices detected in the Piper storage folder.",
+                    "description": (
+                        "Offline Vietnamese Piper voices. The piper-new pack uses one shared "
+                        "config.json for every voice and is installed under models/piper."
+                    ),
                 }
             )
         english_entries = self._piper_voice_entries("en")
@@ -591,7 +805,7 @@ class ResourceDownloadService:
                     "kind": "voice",
                     "status": "installed" if count else "missing",
                     "status_label": f"{count} voice{'s' if count != 1 else ''} available",
-                    "target_dir": models_path("piper-en"),
+                    "target_dir": join_root("models", "piper-en"),
                     "download_url": self._hf_blob_url("zipResource/piper-en.zip"),
                     "expected_filename": "piper-en.zip",
                     "auto_download_supported": True,
@@ -607,7 +821,8 @@ class ResourceDownloadService:
             fw_dir = join_root("bin", "cuda12_fw")
             return os.path.exists(os.path.join(fw_dir, "cublas64_12.dll"))
         if resource_id == "sensevoice:model":
-            return os.path.isfile(os.path.join(models_path("sensevoice"), "model.int8.onnx"))
+            model_dir = self._sensevoice_model_dir()
+            return all(os.path.isfile(os.path.join(model_dir, name)) for name in ("model.int8.onnx", "tokens.txt"))
         if resource_id == "diarization:segmentation":
             return os.path.isfile(self._speaker_diarization_segmentation_path())
         if resource_id == "diarization:embedding":
@@ -647,12 +862,13 @@ class ResourceDownloadService:
         for voice in payload.get("voices", []) or []:
             if isinstance(voice, dict) and str(voice.get("id", "")).strip() == voice_id:
                 return voice
+        for voice in self._piper_voice_entries():
+            if str(voice.get("id", "")).strip() == voice_id:
+                return voice
         return None
 
     def _download_and_extract_zip(self, zip_url: str, extract_to: str, progress_cb=None) -> None:
         import tempfile
-        import urllib.request
-        import zipfile
 
         print(f"[Download] Starting download: {zip_url}")
         print(f"[Download] Target directory: {extract_to}")
@@ -694,11 +910,267 @@ class ResourceDownloadService:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
+    def _download_and_extract_tar(self, archive_url: str, extract_to: str, progress_cb=None) -> None:
+        """Download and safely extract a tar/tar.bz2 resource archive."""
+        import tempfile
+
+        print(f"[Download] Starting download: {archive_url}")
+        print(f"[Download] Target directory: {extract_to}")
+        os.makedirs(extract_to, exist_ok=True)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".tar.bz2") as tmp_file:
+            tmp_path = tmp_file.name
+        try:
+            if progress_cb:
+                progress_cb(-1, "Downloading archive...")
+
+            def _report_progress(block_num, block_size, total_size):
+                if progress_cb and total_size > 0:
+                    downloaded = block_num * block_size
+                    percent = min(99, int((downloaded / total_size) * 100))
+                    progress_cb(percent, f"Downloading... ({percent}%)")
+
+            urllib.request.urlretrieve(archive_url, tmp_path, reporthook=_report_progress)
+            if progress_cb:
+                progress_cb(90, "Extracting archive...")
+
+            root = os.path.abspath(extract_to)
+            with tarfile.open(tmp_path, "r:*") as archive:
+                for member in archive.getmembers():
+                    destination = os.path.abspath(os.path.join(root, member.name))
+                    if os.path.commonpath((root, destination)) != root:
+                        raise RuntimeError("Downloaded archive contains an unsafe path.")
+                archive.extractall(extract_to)
+            if progress_cb:
+                progress_cb(100, "Extraction complete.")
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    @staticmethod
+    def _flatten_resource_file(target_dir: str, filename: str) -> str:
+        """Move a named file from a nested archive layout to its target root."""
+        destination = os.path.join(target_dir, filename)
+        if os.path.isfile(destination):
+            return destination
+        for source in Path(target_dir).rglob(filename):
+            if source.is_file() and os.path.normcase(str(source)) != os.path.normcase(destination):
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                if os.path.exists(destination):
+                    os.remove(destination)
+                shutil.move(str(source), destination)
+                return destination
+        return destination
+
+    def _download_file(self, file_url: str, destination: str, progress_cb=None, label: str = "Downloading file...") -> str:
+        """Download one resource atomically so interrupted files are ignored."""
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        temporary = f"{destination}.part"
+        try:
+            if progress_cb:
+                progress_cb(-1, label)
+
+            def _report_progress(block_num, block_size, total_size):
+                if progress_cb and total_size and total_size > 0:
+                    downloaded = block_num * block_size
+                    percent = min(99, int((downloaded / total_size) * 100))
+                    progress_cb(percent, f"{label} ({percent}%)")
+
+            urllib.request.urlretrieve(file_url, temporary, reporthook=_report_progress)
+            os.replace(temporary, destination)
+            if progress_cb:
+                progress_cb(100, f"{label} (100%)")
+        finally:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+        return destination
+
+    def _download_piper_new_pack(self, progress_cb=None) -> None:
+        """Download the shared-config Vietnamese Piper pack.
+
+        ``piper-new`` is a Hugging Face directory rather than a zip archive:
+        it contains one config.json, one voices.json manifest, and one ONNX
+        file per voice.  Download only missing files so clicking Download on
+        an already populated install is fast and resumable.
+        """
+        target_dir = join_root("models", "piper")
+        os.makedirs(target_dir, exist_ok=True)
+        base_url = self._hf_blob_url("piper-new")
+        manifest_path = os.path.join(target_dir, "voices.json")
+        config_path = os.path.join(target_dir, "config.json")
+
+        def _download_if_needed(filename: str, label: str, index: int, total: int) -> str:
+            destination = os.path.join(target_dir, filename)
+            if os.path.isfile(destination) and os.path.getsize(destination) > 0:
+                if progress_cb:
+                    progress_cb(int(index * 100 / max(total, 1)), f"Already available: {filename}")
+                return destination
+
+            def _scaled_progress(raw_percent, message):
+                if not progress_cb:
+                    return
+                if raw_percent is None or raw_percent < 0:
+                    percent = int(index * 100 / max(total, 1))
+                else:
+                    percent = int(((index + min(raw_percent, 100) / 100.0) * 100) / max(total, 1))
+                progress_cb(min(99, percent), message)
+
+            return self._download_file(
+                f"{base_url}/{filename}",
+                destination,
+                _scaled_progress,
+                label=label,
+            )
+
+        # Fetch the small manifest first; it is the source of truth for the
+        # models shipped by piper-new and avoids hardcoding voice filenames.
+        _download_if_needed("voices.json", "Downloading Piper voice manifest...", 0, 1)
+        try:
+            with open(manifest_path, "r", encoding="utf-8-sig") as handle:
+                manifest = json.load(handle)
+        except Exception as exc:
+            # A stale/corrupt local manifest should not make the whole pack
+            # unusable; redownload it once and report a useful error if it is
+            # still invalid.
+            try:
+                os.remove(manifest_path)
+            except OSError:
+                pass
+            self._download_file(
+                f"{base_url}/voices.json",
+                manifest_path,
+                progress_cb,
+                label="Downloading Piper voice manifest...",
+            )
+            try:
+                with open(manifest_path, "r", encoding="utf-8-sig") as handle:
+                    manifest = json.load(handle)
+            except Exception as retry_exc:
+                raise RuntimeError(f"Piper voice manifest is invalid: {retry_exc}") from exc
+
+        model_names: list[str] = []
+        if isinstance(manifest, list):
+            for item in manifest:
+                if not isinstance(item, dict):
+                    continue
+                audio_path = str(item.get("audio_path", "")).replace("\\", "/").strip()
+                filename = os.path.basename(audio_path)
+                if filename.lower().endswith(".onnx") and filename not in model_names:
+                    model_names.append(filename)
+        if not model_names:
+            raise RuntimeError("Piper voice manifest does not contain any ONNX models.")
+
+        total = len(model_names) + 2  # config + manifest + models
+        # Keep a valid config in the same target folder as all models.
+        _download_if_needed("config.json", "Downloading shared Piper config...", 1, total)
+        for offset, filename in enumerate(model_names, start=2):
+            _download_if_needed(filename, f"Downloading Piper voice: {filename}", offset, total)
+
+        usable = [
+            name for name in model_names
+            if os.path.isfile(os.path.join(target_dir, name))
+            and os.path.getsize(os.path.join(target_dir, name)) > 0
+        ]
+        if not os.path.isfile(config_path) or os.path.getsize(config_path) <= 0 or not usable:
+            raise RuntimeError(f"Piper download incomplete. Check {target_dir} and try again.")
+        if progress_cb:
+            progress_cb(100, f"Piper voices ready ({len(usable)} voices available).")
+
     def download_resource(self, resource_id: str, progress_cb=None) -> None:
         if resource_id.startswith("whisper:"):
-            raise ValueError(
-                "Whisper models are downloaded manually. Use Open Download Page, then extract the ZIP into models/faster_whisper."
+            model_name = resource_id.split(":", 1)[1].strip().lower()
+            zip_name = self.WHISPER_ZIP_FILES.get(model_name)
+            if not zip_name:
+                raise ValueError(f"Unsupported Whisper model: {model_name}")
+            zip_url = self._hf_blob_url(f"zipResource/{zip_name}")
+            target_dir = join_root("models", "faster_whisper")
+            self._download_and_extract_zip(zip_url, target_dir, progress_cb)
+            if not self.is_resource_installed(resource_id):
+                raise RuntimeError(
+                    f"Whisper {model_name} download completed, but no model files were found in {target_dir}."
+                )
+            if progress_cb:
+                progress_cb(100, f"Whisper {model_name} is ready.")
+            return
+
+        if resource_id == "sensevoice:model":
+            zip_url = self._hf_blob_url("zipResource/sensevoice.zip")
+            target_dir = os.path.join(self.workspace_root, "models", "sensevoice")
+            self._download_and_extract_zip(zip_url, target_dir, progress_cb)
+            # Support both archive layouts used by older resource packs:
+            # files directly in sensevoice/ and files nested below a folder.
+            for filename in ("model.int8.onnx", "tokens.txt"):
+                destination = os.path.join(target_dir, filename)
+                if os.path.isfile(destination):
+                    continue
+                for source in Path(target_dir).rglob(filename):
+                    if source.is_file() and os.path.normcase(str(source)) != os.path.normcase(destination):
+                        os.makedirs(os.path.dirname(destination), exist_ok=True)
+                        if os.path.exists(destination):
+                            os.remove(destination)
+                        shutil.move(str(source), destination)
+                        break
+            if not self.is_resource_installed("sensevoice:model"):
+                raise RuntimeError(
+                    "SenseVoice download completed but model.int8.onnx and tokens.txt were not found in the target folder."
+                )
+            if progress_cb:
+                progress_cb(100, "SenseVoice model is ready.")
+            return
+
+        if resource_id == "ocr:engine":
+            target_dir = os.path.join(self.workspace_root, "rapidocr", "models")
+            os.makedirs(target_dir, exist_ok=True)
+            total = len(self._OCR_REQUIRED_MODELS)
+            for index, filename in enumerate(self._OCR_REQUIRED_MODELS):
+                url = self._hf_blob_url(f"rapidocr/models/{filename}")
+                destination = os.path.join(target_dir, filename)
+                temporary = f"{destination}.part"
+                if progress_cb:
+                    progress_cb(int(index * 100 / total), f"Downloading RapidOCR model: {filename}")
+                try:
+                    urllib.request.urlretrieve(url, temporary)
+                    os.replace(temporary, destination)
+                finally:
+                    if os.path.exists(temporary):
+                        os.remove(temporary)
+            if not self.is_resource_installed("ocr:engine"):
+                raise RuntimeError("RapidOCR download completed but one or more model files are missing.")
+            if progress_cb:
+                progress_cb(100, "RapidOCR models are ready.")
+            return
+
+        if resource_id == "diarization:segmentation":
+            archive_url = (
+                "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+                "speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
             )
+            target_dir = join_root("models", "pyannote")
+            self._download_and_extract_tar(archive_url, target_dir, progress_cb)
+            self._flatten_resource_file(target_dir, "model.int8.onnx")
+            if not self.is_resource_installed(resource_id):
+                raise RuntimeError(
+                    "Speaker segmentation download completed, but model.int8.onnx was not found."
+                )
+            if progress_cb:
+                progress_cb(100, "Speaker segmentation model is ready.")
+            return
+
+        if resource_id == "diarization:embedding":
+            file_url = (
+                "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+                "speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
+            )
+            target_dir = join_root("models", "pyannote")
+            destination = os.path.join(
+                target_dir,
+                "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+            )
+            self._download_file(file_url, destination, progress_cb, "Downloading speaker embedding model...")
+            if not self.is_resource_installed(resource_id):
+                raise RuntimeError("Speaker embedding download completed, but the ONNX model was not found.")
+            if progress_cb:
+                progress_cb(100, "Speaker embedding model is ready.")
+            return
 
         if resource_id == "cuda:whisper":
             zip_url = self._hf_blob_url("zipResource/cuda12_fw.zip")
@@ -748,13 +1220,11 @@ class ResourceDownloadService:
 
         if resource_id.startswith("voice:"):
             if resource_id == "voice:pack":
-                zip_url = self._hf_blob_url("zipResource/piper.zip")
-                target_dir = models_path("piper")
-                self._download_and_extract_zip(zip_url, target_dir, progress_cb)
+                self._download_piper_new_pack(progress_cb)
                 return
             if resource_id == "voice:pack-en":
                 zip_url = self._hf_blob_url("zipResource/piper-en.zip")
-                target_dir = models_path("piper-en")
+                target_dir = join_root("models", "piper-en")
                 self._download_and_extract_zip(zip_url, target_dir, progress_cb)
                 return
 

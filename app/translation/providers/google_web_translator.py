@@ -1,6 +1,7 @@
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from html.parser import HTMLParser
 from urllib.parse import quote
 
 import requests
@@ -8,8 +9,38 @@ import requests
 from ..errors import TranslationProviderError
 
 
+class _MobileResultParser(HTMLParser):
+    """Extract the translated text from Google's mobile Translate page."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._result_depth = 0
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if self._result_depth:
+            self._result_depth += 1
+            return
+        if tag.lower() == "div":
+            classes = dict(attrs).get("class", "")
+            if "result-container" in str(classes).split():
+                self._result_depth = 1
+
+    def handle_endtag(self, tag):
+        if self._result_depth:
+            self._result_depth -= 1
+
+    def handle_data(self, data):
+        if self._result_depth and data:
+            self.parts.append(data)
+
+
 class GoogleWebTranslatorProvider:
     BASE_URL = "https://translate.googleapis.com/translate_a/single"
+    # The undocumented JSON endpoint is frequently rate-limited.  Google
+    # still exposes the same free translation through this mobile page.
+    MOBILE_URL = "https://translate.google.com/m"
+    MOBILE_MAX_CHARS = 2048
     MAX_WORKERS = 6
 
     def is_configured(self) -> bool:
@@ -69,8 +100,13 @@ class GoogleWebTranslatorProvider:
             f"&dt=t&q={query}"
         )
         headers = {
-            "User-Agent": "Mozilla/5.0",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0 Safari/537.36"
+            ),
             "Accept": "application/json,text/plain,*/*",
+            "Accept-Language": "en-US,en;q=0.9",
         }
 
         for attempt in range(1, max_retries + 1):
@@ -78,16 +114,61 @@ class GoogleWebTranslatorProvider:
                 response = requests.get(url, headers=headers, timeout=timeout)
                 if response.status_code != 200:
                     last_error = f"Google web translate error ({response.status_code}): {response.text}"
+                    # The free JSON endpoint is undocumented and can be
+                    # blocked per IP.  Try the public mobile Translate page
+                    # before retrying the same blocked endpoint.
+                    if response.status_code in {403, 429}:
+                        try:
+                            mobile_text = self._translate_mobile(
+                                text=text,
+                                src_lang=src_lang,
+                                target_lang=target_lang,
+                                timeout=timeout,
+                                headers=headers,
+                            )
+                            if mobile_text:
+                                return mobile_text
+                        except Exception as mobile_exc:
+                            last_error = f"{last_error}; mobile fallback failed: {mobile_exc}"
                     if attempt < max_retries:
-                        time.sleep(attempt)
+                        retry_after = response.headers.get("Retry-After", "")
+                        try:
+                            delay = max(1.0, min(float(retry_after), 10.0))
+                        except (TypeError, ValueError):
+                            delay = min(float(attempt), 5.0)
+                        time.sleep(delay)
                         continue
                     raise TranslationProviderError(last_error)
 
-                payload = response.json()
-                translated = self._extract_text(payload)
+                try:
+                    payload = response.json()
+                    translated = self._extract_text(payload)
+                except ValueError as exc:
+                    translated = ""
+                    last_error = f"Google web translate returned invalid JSON: {exc}"
                 if translated:
                     return translated
-                raise TranslationProviderError("Google web translate returned empty text.")
+
+                # A future endpoint change may return HTTP 200 with a
+                # different payload shape.  Treat that the same as a blocked
+                # endpoint and try the mobile response before retrying.
+                try:
+                    mobile_text = self._translate_mobile(
+                        text=text,
+                        src_lang=src_lang,
+                        target_lang=target_lang,
+                        timeout=timeout,
+                        headers=headers,
+                    )
+                    if mobile_text:
+                        return mobile_text
+                except Exception as mobile_exc:
+                    last_error = (
+                        last_error or "Google web translate returned empty text."
+                    ) + f"; mobile fallback failed: {mobile_exc}"
+                raise TranslationProviderError(
+                    last_error or "Google web translate returned empty text."
+                )
             except (requests.RequestException, json.JSONDecodeError, TranslationProviderError) as exc:
                 last_error = str(exc)
                 if attempt < max_retries:
@@ -95,6 +176,39 @@ class GoogleWebTranslatorProvider:
                     continue
 
         raise TranslationProviderError(last_error or "Google web translate failed.")
+
+    def _translate_mobile(
+        self,
+        *,
+        text: str,
+        src_lang: str,
+        target_lang: str,
+        timeout: int,
+        headers: dict,
+    ) -> str:
+        """Translate one cue through Google's mobile web surface."""
+        if len(text or "") > self.MOBILE_MAX_CHARS:
+            raise TranslationProviderError(
+                f"Google mobile fallback supports at most {self.MOBILE_MAX_CHARS} characters per subtitle."
+            )
+        mobile_headers = dict(headers or {})
+        mobile_headers["Accept"] = "text/html,application/xhtml+xml"
+        response = requests.get(
+            self.MOBILE_URL,
+            params={"sl": src_lang, "tl": target_lang, "q": text or ""},
+            headers=mobile_headers,
+            timeout=timeout,
+        )
+        if response.status_code != 200:
+            raise TranslationProviderError(
+                f"Google mobile translate error ({response.status_code}): {response.text[:300]}"
+            )
+        parser = _MobileResultParser()
+        parser.feed(response.text or "")
+        translated = "".join(parser.parts).strip()
+        if not translated:
+            raise TranslationProviderError("Google mobile translate returned empty text.")
+        return translated
 
     def _extract_text(self, payload) -> str:
         if not isinstance(payload, list) or not payload:

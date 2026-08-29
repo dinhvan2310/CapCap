@@ -212,6 +212,7 @@ class ProjectService:
         background_path: str = "",
         original_volume: int = 50,
         dub_volume: int = 100,
+        normalizer_signature: str = "",
     ) -> str:
         safe_voice_speed = max(0.5, min(1.30, float(voice_speed or 1.0)))
         def _segment_voice_text(seg) -> str:
@@ -227,9 +228,14 @@ class ProjectService:
             "voice_name": str(voice_name or "").strip(),
             "voice_speed": round(safe_voice_speed, 3),
             "timing_sync_mode": str(timing_sync_mode or "off").strip().lower(),
-            "background": self._file_signature(background_path),
-            "original_volume": int(original_volume or 50),
-            "dub_volume": int(dub_volume or 100),
+            # Voice generation produces the standalone TS1 track.  Original,
+            # Music, and per-track volume values belong to the later mix
+            # stage and must not invalidate/re-run TTS when only the mix is
+            # edited. Keep the parameters in the API for old callers.
+            # The pronunciation dictionary changes generated audio without
+            # changing the subtitle text.  Include its fingerprint so a
+            # project edit invalidates the existing voice-track cache.
+            "normalizer_signature": str(normalizer_signature or "").strip(),
             "segments": [
                 {
                     "start": round(float((seg or {}).get("start", 0.0) or 0.0), 3),

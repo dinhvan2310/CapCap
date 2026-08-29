@@ -203,8 +203,17 @@ class EngineRuntime:
         speed: float = 1.0,
         tmp_dir: str | None = None,
         on_progress: callable = None,
+        normalizer_dictionary=None,
     ) -> str:
-        return self.tts.synthesize_segment(text=text, wav_path=wav_path, voice=voice, speed=speed, tmp_dir=tmp_dir, on_progress=on_progress)
+        return self.tts.synthesize_segment(
+            text=text,
+            wav_path=wav_path,
+            voice=voice,
+            speed=speed,
+            tmp_dir=tmp_dir,
+            on_progress=on_progress,
+            normalizer_dictionary=normalizer_dictionary,
+        )
 
     def build_voice_track(self, *, segments, tts_wav_paths, output_wav_path: str, gain_db: float = 0.0) -> str:
         return self.audio_mix.build_voice_track(
@@ -299,6 +308,21 @@ class EngineRuntime:
             output_wav_path=output_wav_path,
             original_gain_db=original_gain_db,
             dub_gain_db=dub_gain_db,
+        )
+
+    def mix_audio_tracks(
+        self,
+        *,
+        tracks,
+        output_wav_path: str,
+        total_duration_ms: int | None = None,
+        sample_rate: int = 16000,
+    ) -> str:
+        return self.audio_mix.mix_audio_tracks(
+            tracks=tracks,
+            output_wav_path=output_wav_path,
+            total_duration_ms=total_duration_ms,
+            sample_rate=sample_rate,
         )
 
     def mux_audio_for_preview(self, video_path: str, audio_path: str, output_video_path: str, *, target_width=None, target_height=None, output_scale_mode="fit", focus_x=0.5, focus_y=0.5, output_fps=None, video_filter_state=None) -> str:

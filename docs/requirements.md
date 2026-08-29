@@ -12,6 +12,7 @@
 GPU acceleration is used by Faster-Whisper and RapidOCR. It requires a supported NVIDIA GPU and a current NVIDIA driver. The CUDA runtime pack is intentionally downloaded on demand through **Manage Resources** rather than bundled into the installer.
 
 No CUDA Toolkit installation is required when the CUDA runtime pack is installed.
+Faster-Whisper GPU execution requires CTranslate2 4.6.3 or newer for the CUDA 12.8 runtime pack.
 
 ## Resource Manager
 
@@ -20,9 +21,9 @@ Open **Manage Resources** from the launcher or Settings. It reports each resourc
 | Resource | Target folder |
 | --- | --- |
 | Faster-Whisper models | `models/faster_whisper/` |
-| CUDA 12 runtime pack | `bin/cuda12_fw/` |
+| CUDA 12.8 runtime pack | `bin/cuda12_fw/` |
 | SenseVoice model | `models/sensevoice/` |
-| Vietnamese Piper voices | `models/piper/` |
+| Vietnamese Piper voices (`piper-new`, shared config) | `models/piper/` (`config.json` + `voices.json` + `.onnx`) |
 | English Piper voices | `models/piper-en/` |
 | Speaker diarization models | `models/pyannote/` |
 

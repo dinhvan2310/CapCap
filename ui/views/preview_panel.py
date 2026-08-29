@@ -8,7 +8,6 @@ from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -25,6 +24,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from widgets.spin_boxes import ReliableDoubleSpinBox
 
 from runtime_paths import asset_path
 from widgets import MpvVideoView, VideoView
@@ -1262,20 +1262,39 @@ def build_preview_panel(gui):
     gui.rewrite_translation_btn = QPushButton("Rewrite")
     gui.subtitle_editor_btn = QPushButton("Subtitle Editor")
     gui.import_translation_btn = QPushButton("Import SRT")
+    gui.normalizer_dict_btn = QPushButton("Normalizer Dictionary")
+    gui.normalizer_dict_btn.setToolTip("Project-specific Piper pronunciation dictionary")
     gui.audio_inspector_regenerate_voice_btn = QPushButton("Regenerate voice")
     gui.audio_inspector_regenerate_voice_btn.setToolTip(
         "Re-generate the dubbed voice for the currently selected segment."
     )
     gui.rewrite_translation_btn.setEnabled(False)
     gui.subtitle_editor_btn.setEnabled(False)
+    gui.normalizer_dict_btn.setEnabled(False)
     gui.audio_inspector_regenerate_voice_btn.setEnabled(False)
+    gui.rewrite_translation_btn.setVisible(False)
+    gui.subtitle_editor_btn.setVisible(False)
+    gui.normalizer_dict_btn.setVisible(False)
+    gui.audio_inspector_regenerate_voice_btn.setVisible(False)
     gui.subtitle_editor_btn.clicked.connect(gui.open_subtitle_editor)
     inspector_actions_row.addWidget(gui.rewrite_translation_btn)
     inspector_actions_row.addWidget(gui.subtitle_editor_btn)
-    inspector_actions_row.addWidget(gui.import_translation_btn)
-    inspector_actions_row.addWidget(gui.audio_inspector_regenerate_voice_btn)
+    inspector_actions_row.addWidget(gui.normalizer_dict_btn)
     inspector_actions_row.addStretch(1)
     inspector_layout.addLayout(inspector_actions_row)
+
+    # Keep the voice-generation action on its own row.  The other subtitle
+    # review actions can have long labels as well, and placing all of them in
+    # one row caused the Regenerate voice label to be clipped in the compact
+    # inspector.  The same button instance is retained so its visibility,
+    # enablement, and existing signal wiring are unchanged.
+    inspector_voice_actions_row = QHBoxLayout()
+    inspector_voice_actions_row.setSpacing(8)
+    inspector_voice_actions_row.addWidget(gui.import_translation_btn)
+    inspector_voice_actions_row.addWidget(gui.audio_inspector_regenerate_voice_btn)
+    inspector_voice_actions_row.addStretch(1)
+    inspector_layout.addLayout(inspector_voice_actions_row)
+    gui.inspector_voice_actions_row = inspector_voice_actions_row
 
     # The original transcript is shown immediately above the editable
     # "Text shown on screen" field inside the selected subtitle card.  Do
@@ -1340,7 +1359,7 @@ def build_preview_panel(gui):
     fade_in_label = QLabel("Fade In")
     fade_in_label.setMinimumWidth(50)
     fade_row.addWidget(fade_in_label)
-    gui.audio_inspector_fade_in_spin = QDoubleSpinBox()
+    gui.audio_inspector_fade_in_spin = ReliableDoubleSpinBox()
     gui.audio_inspector_fade_in_spin.setRange(0.0, 30.0)
     gui.audio_inspector_fade_in_spin.setSingleStep(0.1)
     gui.audio_inspector_fade_in_spin.setValue(0.0)
@@ -1350,7 +1369,7 @@ def build_preview_panel(gui):
     fade_out_label = QLabel("Fade Out")
     fade_out_label.setMinimumWidth(60)
     fade_row.addWidget(fade_out_label)
-    gui.audio_inspector_fade_out_spin = QDoubleSpinBox()
+    gui.audio_inspector_fade_out_spin = ReliableDoubleSpinBox()
     gui.audio_inspector_fade_out_spin.setRange(0.0, 30.0)
     gui.audio_inspector_fade_out_spin.setSingleStep(0.1)
     gui.audio_inspector_fade_out_spin.setValue(0.0)
@@ -1385,7 +1404,7 @@ def build_preview_panel(gui):
         timing_row = QHBoxLayout()
         timing_row.setSpacing(6)
         timing_row.addWidget(QLabel("Start"))
-        start_spin = QDoubleSpinBox()
+        start_spin = ReliableDoubleSpinBox()
         start_spin.setRange(0.0, 86400.0)
         start_spin.setDecimals(2)
         start_spin.setSingleStep(0.1)
@@ -1394,7 +1413,7 @@ def build_preview_panel(gui):
         setattr(gui, f"{prefix}_inspector_start_spin", start_spin)
         timing_row.addWidget(start_spin, 1)
         timing_row.addWidget(QLabel("End"))
-        end_spin = QDoubleSpinBox()
+        end_spin = ReliableDoubleSpinBox()
         end_spin.setRange(0.1, 86400.0)
         end_spin.setDecimals(2)
         end_spin.setSingleStep(0.1)

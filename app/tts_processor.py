@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -6,9 +7,10 @@ import subprocess
 import threading
 import time
 import wave
+from pathlib import Path
 
 from dotenv import load_dotenv
-from runtime_paths import app_path, bin_path, bundle_root, models_path, temp_path, subprocess_text_kwargs
+from runtime_paths import app_path, bin_path, models_path, temp_path, subprocess_text_kwargs
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(os.path.dirname(BASE_DIR), ".env")
 if os.path.exists(ENV_PATH):
@@ -19,10 +21,190 @@ _PIPER_VOICE_CACHE = {}
 _PIPER_VOICE_CACHE_LOCK = threading.Lock()
 _VIETNAMESE_NORMALIZER = None
 _VIETNAMESE_NORMALIZER_DATA_DIR = ""
+_VIETNAMESE_NORMALIZER_CACHE = {}
+_VIETNAMESE_NORMALIZER_CACHE_LOCK = threading.RLock()
+
+
+def _canonical_normalizer_dictionary(dictionary) -> dict:
+    """Return the project dictionary in a stable, validated representation.
+
+    The dictionary is project data, not a global resource.  Keep only the
+    two pronunciation maps supported by the UI and normalize keys before
+    they reach vietnormalizer so cache keys and matching are deterministic.
+    """
+    raw = dictionary if isinstance(dictionary, dict) else {}
+
+    def _rows(*names):
+        value = []
+        for name in names:
+            candidate = raw.get(name)
+            if candidate is not None:
+                value = candidate
+                break
+        if isinstance(value, dict):
+            value = [value]
+        if not isinstance(value, (list, tuple)):
+            return []
+        result = []
+        for row in value:
+            if not isinstance(row, dict):
+                continue
+            key = ""
+            for field in ("acronym", "original", "word", "source", "text", "key"):
+                if field in row:
+                    key = str(row.get(field) or "").strip()
+                    if key:
+                        break
+            pronunciation = ""
+            for field in ("transliteration", "pronunciation", "vietnamese_pronunciation", "replacement", "value"):
+                if field in row:
+                    pronunciation = str(row.get(field) or "").strip()
+                    if pronunciation:
+                        break
+            if key and pronunciation:
+                result.append({"key": key.lower(), "value": pronunciation})
+        result.sort(key=lambda item: (len(item["key"]), item["key"], item["value"]))
+        return result
+
+    return {
+        "acronyms": _rows("acronyms", "acronym"),
+        "non_vietnamese_words": _rows(
+            "non_vietnamese_words",
+            "non-vietnamese-words",
+            "non_vietnamese",
+            "words",
+        ),
+    }
+
+
+def normalizer_dictionary_fingerprint(dictionary=None) -> str:
+    """Return a stable cache key for a project's pronunciation dictionary."""
+    payload = json.dumps(
+        _canonical_normalizer_dictionary(dictionary),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def reset_vietnamese_normalizer_cache() -> None:
+    """Drop all in-process normalizer instances after dictionary edits."""
+    global _VIETNAMESE_NORMALIZER, _VIETNAMESE_NORMALIZER_DATA_DIR
+    with _VIETNAMESE_NORMALIZER_CACHE_LOCK:
+        _VIETNAMESE_NORMALIZER_CACHE.clear()
+        _VIETNAMESE_NORMALIZER = None
+        _VIETNAMESE_NORMALIZER_DATA_DIR = ""
+
+
+def _build_vietnamese_normalizer(dictionary) -> object:
+    """Build a normalizer from bundled data plus project overrides."""
+    from vietnormalizer.normalizer import VietnameseNormalizer
+
+    normalizer = VietnameseNormalizer()
+    canonical = _canonical_normalizer_dictionary(dictionary)
+    for row in canonical["acronyms"]:
+        normalizer.acronym_map[row["key"]] = row["value"]
+    for row in canonical["non_vietnamese_words"]:
+        normalizer.non_vietnamese_map[row["key"]] = row["value"]
+    normalizer.acronym_map = dict(
+        sorted(normalizer.acronym_map.items(), key=lambda item: len(item[0]), reverse=True)
+    )
+    normalizer.non_vietnamese_map = dict(
+        sorted(normalizer.non_vietnamese_map.items(), key=lambda item: len(item[0]), reverse=True)
+    )
+    normalizer._build_replacement_dict()
+    return normalizer
+
+
+def _get_vietnamese_normalizer(dictionary=None):
+    global _VIETNAMESE_NORMALIZER, _VIETNAMESE_NORMALIZER_DATA_DIR
+    canonical = _canonical_normalizer_dictionary(dictionary)
+    cache_key = normalizer_dictionary_fingerprint(canonical)
+    with _VIETNAMESE_NORMALIZER_CACHE_LOCK:
+        if cache_key in _VIETNAMESE_NORMALIZER_CACHE:
+            normalizer = _VIETNAMESE_NORMALIZER_CACHE[cache_key]
+            _VIETNAMESE_NORMALIZER = normalizer
+            _VIETNAMESE_NORMALIZER_DATA_DIR = f"project:{cache_key}"
+            return normalizer
+    try:
+        normalizer = _build_vietnamese_normalizer(canonical)
+        entries = len(canonical["acronyms"]) + len(canonical["non_vietnamese_words"])
+        print(f"[TTS] Vietnamese normalizer loaded (project entries: {entries}).")
+    except Exception as exc:
+        # Keep Piper usable even if optional normalizer data is unavailable;
+        # the detailed reason remains in the log for packaged-build support.
+        print(f"[TTS] Vietnamese normalizer unavailable; using original text: {exc}")
+        normalizer = False
+    with _VIETNAMESE_NORMALIZER_CACHE_LOCK:
+        _VIETNAMESE_NORMALIZER_CACHE[cache_key] = normalizer
+    _VIETNAMESE_NORMALIZER = normalizer
+    _VIETNAMESE_NORMALIZER_DATA_DIR = f"project:{cache_key}"
+    return normalizer
 
 
 def _voice_catalog_path() -> str:
     return app_path("voice_preview_catalog.json")
+
+
+def _append_local_piper_manifest_voices(catalog: dict) -> dict:
+    """Add piper-new voices that are not present in the static catalog.
+
+    The packaged catalog is read-only, while users can download additional
+    piper-new models into ``models/piper``.  Keep TTS/Preview Voice aligned
+    with the UI by resolving those manifest entries in memory.
+    """
+    if not isinstance(catalog, dict):
+        catalog = {"voices": []}
+    voices = catalog.setdefault("voices", [])
+    if not isinstance(voices, list):
+        voices = []
+        catalog["voices"] = voices
+    known_ids = {
+        str(item.get("id", "")).strip()
+        for item in voices
+        if isinstance(item, dict) and str(item.get("id", "")).strip()
+    }
+    manifest_path = models_path("piper", "voices.json")
+    if not os.path.isfile(manifest_path):
+        return catalog
+    try:
+        with open(manifest_path, "r", encoding="utf-8-sig") as handle:
+            manifest = json.load(handle)
+    except Exception:
+        return catalog
+    if not isinstance(manifest, list):
+        return catalog
+    for item in manifest:
+        if not isinstance(item, dict):
+            continue
+        audio_path = str(item.get("audio_path", "") or "").replace("\\", "/").strip()
+        filename = os.path.basename(audio_path)
+        voice_id = os.path.splitext(filename)[0]
+        if not voice_id or voice_id in known_ids:
+            continue
+        model_path = models_path("piper", filename)
+        if not os.path.isfile(model_path) or os.path.getsize(model_path) <= 0:
+            continue
+        voices.append(
+            {
+                "id": voice_id,
+                "name": str(item.get("name", "") or "").strip() or voice_id,
+                "provider": "piper",
+                "provider_voice": f"models/piper/{filename}",
+                "language": "vi",
+                "gender": str(item.get("gender", "") or "").strip(),
+                "tier": "free",
+                "preview_video_url": "",
+                "preview_video_path": "",
+                "preview_audio_url": "",
+                "preview_audio_path": "",
+                "enabled": True,
+                "tags": ["local", "piper"],
+            }
+        )
+        known_ids.add(voice_id)
+    return catalog
 
 
 def _resolve_piper_model_path(provider_voice: str) -> str:
@@ -33,33 +215,78 @@ def _resolve_piper_model_path(provider_voice: str) -> str:
     if os.path.isabs(normalized):
         return normalized
     if normalized.startswith(f"models{os.sep}"):
-        candidate = os.path.join(bundle_root(), normalized)
-        if os.path.exists(candidate):
-            return candidate
-        return os.path.join(os.path.dirname(bundle_root()), normalized)
+        # models_path() prefers user-installed files and falls back to the
+        # read-only PyInstaller bundle.  Resolving through bundle_root()
+        # directly would make a bundled voice shadow a newer voice downloaded
+        # into CapCap/models after installation.
+        relative = normalized[len("models" + os.sep):]
+        return models_path(*Path(relative).parts)
     return models_path(normalized)
 
 
-def _get_cached_piper_voice(*, model_path: str, on_progress: callable = None):
+def _resolve_piper_config_path(model_path: str, config_path: str | None = None) -> str:
+    """Resolve the Piper JSON config for a model.
+
+    Older Piper packs put a separate ``<model>.onnx.json`` next to every
+    voice.  The current Vietnamese ``piper-new`` pack intentionally shares a
+    single ``models/piper/config.json`` between all ONNX voices.  Prefer an
+    explicitly supplied config, then the shared Vietnamese config when it is
+    present, and finally the legacy per-model file so both layouts remain
+    compatible.
+    """
+    model_key = os.path.abspath(str(model_path or "").strip()) if model_path else ""
+    if config_path:
+        candidate = os.path.abspath(str(config_path).strip())
+        if os.path.isfile(candidate):
+            return candidate
+    if not model_key:
+        return ""
+    legacy = f"{model_key}.json"
+    shared = os.path.join(os.path.dirname(model_key), "config.json")
+    folder_name = os.path.basename(os.path.dirname(model_key)).lower()
+    # piper-new is the canonical Vietnamese layout.  If both an old
+    # per-model sidecar and the new shared config are present, use the shared
+    # config so every voice is rendered with the same metadata.
+    if folder_name == "piper" and os.path.isfile(shared):
+        return shared
+    if os.path.isfile(legacy):
+        return legacy
+    if os.path.isfile(shared):
+        return shared
+    # A model may be downloaded into the writable folder while the shared
+    # config is still bundled (or vice versa).  Look up the matching language
+    # directory through models_path() before giving up.
+    if folder_name:
+        bundled_or_writable_shared = models_path(folder_name, "config.json")
+        if os.path.isfile(bundled_or_writable_shared):
+            return bundled_or_writable_shared
+    return ""
+
+
+def _get_cached_piper_voice(*, model_path: str, config_path: str | None = None, on_progress: callable = None):
     from piper import PiperVoice
     model_key = os.path.abspath(str(model_path or "").strip())
     if not model_key:
         raise ValueError("model_path is required for Piper TTS")
+    config_key = _resolve_piper_config_path(model_key, config_path)
+    cache_key = (model_key, config_key)
 
     with _PIPER_VOICE_CACHE_LOCK:
-        cached = _PIPER_VOICE_CACHE.get(model_key)
+        cached = _PIPER_VOICE_CACHE.get(cache_key)
         if cached is not None:
             return cached
 
     if on_progress:
         on_progress(f"Loading Piper model from {os.path.basename(model_key)}...")
 
-    voice = PiperVoice.load(model_key)
+    # Passing the resolved path is important for the shared-config Piper pack;
+    # Piper otherwise assumes a sibling ``<model>.onnx.json`` file exists.
+    voice = PiperVoice.load(model_key, config_path=config_key or None)
 
     with _PIPER_VOICE_CACHE_LOCK:
         # Avoid double-load if another thread raced.
-        _PIPER_VOICE_CACHE.setdefault(model_key, voice)
-        return _PIPER_VOICE_CACHE[model_key]
+        _PIPER_VOICE_CACHE.setdefault(cache_key, voice)
+        return _PIPER_VOICE_CACHE[cache_key]
 
 
 def _ffmpeg_path():
@@ -119,7 +346,13 @@ def _speed_to_float(speed) -> float:
         return 1.0
 
 
-def normalize_text_for_tts(text: str, *, provider: str = "piper", language: str = "vi") -> str:
+def normalize_text_for_tts(
+    text: str,
+    *,
+    provider: str = "piper",
+    language: str = "vi",
+    normalizer_dictionary=None,
+) -> str:
     value = " ".join(str(text or "").replace("\n", " ").split()).strip()
     if not value:
         return ""
@@ -130,76 +363,11 @@ def normalize_text_for_tts(text: str, *, provider: str = "piper", language: str 
     if not str(language or "vi").strip().lower().startswith("vi"):
         return value
 
-    global _VIETNAMESE_NORMALIZER, _VIETNAMESE_NORMALIZER_DATA_DIR
-    if _VIETNAMESE_NORMALIZER is None:
-        try:
-            from vietnormalizer.normalizer import VietnameseNormalizer
-            from vietnormalizer import normalizer as vn_mod
-            from pathlib import Path
-            import csv
-
-            custom_dir = Path(models_path("vietnormalizer"))
-            combined_dir = custom_dir / "_combined"
-            default_data = Path(vn_mod.__file__).parent / "data"
-
-            if custom_dir.exists() and any(custom_dir.glob("*.csv")):
-                combined_dir.mkdir(parents=True, exist_ok=True)
-                dict_files = [
-                    ("acronyms.csv", "acronym"),
-                    ("non-vietnamese-words.csv", "original"),
-                ]
-                for filename, key_col in dict_files:
-                    target = combined_dir / filename
-                    src = default_data / filename
-                    entries = {}
-                    if src.exists():
-                        with open(src, encoding="utf-8", newline="") as f:
-                            for row in csv.DictReader(f):
-                                k = (row.get(key_col) or "").strip().lower()
-                                if k:
-                                    entries[k] = row
-                    custom_file = custom_dir / filename
-                    if custom_file.exists():
-                        with open(custom_file, encoding="utf-8", newline="") as f:
-                            for row in csv.DictReader(f):
-                                k = (row.get(key_col) or "").strip().lower()
-                                if k:
-                                    entries[k] = row
-                    rows = list(entries.values())
-                    rows.sort(key=lambda r: len(r.get(key_col, "") or ""), reverse=True)
-                    fieldnames = list(rows[0].keys()) if rows else [key_col, "transliteration"]
-                    with open(target, "w", encoding="utf-8", newline="") as f:
-                        w = csv.DictWriter(f, fieldnames=fieldnames)
-                        w.writeheader()
-                        w.writerows(rows)
-
-                _VIETNAMESE_NORMALIZER = VietnameseNormalizer(data_dir=str(combined_dir))
-
-                custom_acro = custom_dir / "acronyms.csv"
-                if custom_acro.exists():
-                    with open(custom_acro, encoding="utf-8", newline="") as f:
-                        for row in csv.DictReader(f):
-                            k = (row.get("acronym") or "").strip().lower()
-                            v = (row.get("transliteration") or "").strip()
-                            if k and v:
-                                _VIETNAMESE_NORMALIZER.non_vietnamese_map[k] = v
-                    _VIETNAMESE_NORMALIZER.non_vietnamese_map = dict(
-                        sorted(_VIETNAMESE_NORMALIZER.non_vietnamese_map.items(), key=lambda x: len(x[0]), reverse=True)
-                    )
-                    _VIETNAMESE_NORMALIZER._build_replacement_dict()
-
-                _VIETNAMESE_NORMALIZER_DATA_DIR = str(custom_dir)
-                print(f"[TTS] Vietnamese normalizer loaded with custom dicts from: {custom_dir}")
-            else:
-                _VIETNAMESE_NORMALIZER = VietnameseNormalizer()
-                _VIETNAMESE_NORMALIZER_DATA_DIR = ""
-        except Exception:
-            _VIETNAMESE_NORMALIZER = False
-            _VIETNAMESE_NORMALIZER_DATA_DIR = ""
-    if _VIETNAMESE_NORMALIZER is False:
+    normalizer = _get_vietnamese_normalizer(normalizer_dictionary)
+    if normalizer is False:
         return value
     try:
-        normalized = _VIETNAMESE_NORMALIZER.normalize(value)
+        normalized = normalizer.normalize(value)
         return " ".join(str(normalized or "").replace("\n", " ").split()).strip() or value
     except Exception:
         return value
@@ -250,6 +418,7 @@ def piper_tts_to_wav_16k_mono(
     speed: float = 1.0,
     tmp_dir: str | None = None,
     on_progress: callable = None,
+    normalizer_dictionary=None,
 ) -> str:
     """
     Synthesize text to WAV (16kHz, mono) using Piper TTS with ONNX model.
@@ -263,7 +432,12 @@ def piper_tts_to_wav_16k_mono(
     os.makedirs(tmp_dir, exist_ok=True)
 
     # Normalize text
-    normalized_text = normalize_text_for_tts(text, provider="piper", language=language)
+    normalized_text = normalize_text_for_tts(
+        text,
+        provider="piper",
+        language=language,
+        normalizer_dictionary=normalizer_dictionary,
+    )
 
     # Load Piper voice
     voice = _get_cached_piper_voice(model_path=model_path, on_progress=on_progress)
@@ -357,6 +531,7 @@ def preload_tts_voice(voice: str, on_progress: callable = None) -> bool:
     catalog_path = _voice_catalog_path()
     with open(catalog_path, "r", encoding="utf-8") as f:
         catalog = json.load(f)
+    catalog = _append_local_piper_manifest_voices(catalog)
 
     voice_entry = None
     voice_to_search = str(voice).strip()
@@ -396,11 +571,13 @@ def synthesize_text_to_wav_16k_mono(
     speed: float = 1.0,
     tmp_dir: str | None = None,
     on_progress: callable = None,
+    normalizer_dictionary=None,
 ) -> str:
     # Load voice catalog
     catalog_path = _voice_catalog_path()
     with open(catalog_path, "r", encoding="utf-8") as f:
         catalog = json.load(f)
+    catalog = _append_local_piper_manifest_voices(catalog)
     
     # Find voice in catalog
     voice_entry = None
@@ -450,6 +627,7 @@ def synthesize_text_to_wav_16k_mono(
             speed=speed,
             tmp_dir=tmp_dir,
             on_progress=on_progress,
+            normalizer_dictionary=normalizer_dictionary,
         )
     elif provider == "edge":
         # Use Edge TTS
