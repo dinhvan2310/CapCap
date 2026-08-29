@@ -15,6 +15,7 @@ import os
 import queue
 import secrets
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -30,10 +31,11 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-
 APP_ROOT = Path(__file__).resolve().parent.parent
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from runtime_paths import ffmpeg_binary_path, ffprobe_binary_path
 
 
 def _env_path(name: str, default: str) -> Path:
@@ -266,6 +268,7 @@ class JobManager:
             job.message = str(message or job.message)
             job.updated_at = _utc_now()
             job.events.append({"type": "progress", **job.snapshot()})
+            print(f"[CapCap] {job.progress}% · {job.phase} · {job.message}", flush=True)
 
     def start(self, project_id: str, phase: str, payload: dict[str, Any]) -> Job:
         with self.lock:
@@ -408,8 +411,10 @@ class JobManager:
                 self.storage.save_project(job.project_id, state)
             self._finish(job, "Job complete")
         except InterruptedError as exc:
+            print(f"[CapCap][ERROR] {exc}", flush=True)
             self._emit(job, str(exc), progress=job.progress, status="cancelled")
         except Exception as exc:  # workflow errors are user-visible job failures
+            print(f"[CapCap][ERROR] {exc}", flush=True)
             self._emit(job, str(exc), progress=job.progress, status="failed")
             with self.lock:
                 job.error = str(exc)
@@ -682,6 +687,17 @@ def artifact(project_id: str, artifact_name: str, _: None = Depends(_auth)) -> F
 
 @app.get("/api/projects/{project_id}/source")
 def source_video(project_id: str, _: None = Depends(_auth)) -> FileResponse:
+    path = _resolve_source_video(project_id)
+    return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "video/mp4", filename=path.name)
+
+
+_PREVIEW_CACHE_LOCK = threading.RLock()
+_PREVIEW_MAX_WIDTH = 1920
+_PREVIEW_MAX_HEIGHT = 1080
+_PREVIEW_CRF = 21
+
+
+def _resolve_source_video(project_id: str) -> Path:
     try:
         state = storage.load_project(project_id)
         project_dir = (storage.project_root / str(project_id)).resolve()
@@ -690,7 +706,108 @@ def source_video(project_id: str, _: None = Depends(_auth)) -> FileResponse:
             raise FileNotFoundError("source video not found")
     except (FileNotFoundError, PermissionError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "video/mp4", filename=path.name)
+    return path
+
+
+def _probe_browser_compatibility(source: Path) -> bool:
+    ffprobe = Path(ffprobe_binary_path())
+    if not ffprobe.is_file():
+        raise RuntimeError(f"FFprobe is not available: {ffprobe}")
+    result = subprocess.run(
+        [
+            str(ffprobe), "-v", "error", "-print_format", "json",
+            "-show_streams", "-show_format", str(source),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=90,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "FFprobe failed").strip()
+        raise RuntimeError(f"FFprobe failed: {detail[-2000:]}")
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"FFprobe returned invalid JSON: {exc}") from exc
+    streams = list(payload.get("streams") or [])
+    video = next((item for item in streams if item.get("codec_type") == "video"), None)
+    audio = next((item for item in streams if item.get("codec_type") == "audio"), None)
+    format_name = str((payload.get("format") or {}).get("format_name") or "").split(",")
+    if not video or "mp4" not in format_name:
+        return False
+    video_codec = str(video.get("codec_name") or "").lower()
+    pixel_format = str(video.get("pix_fmt") or "").lower()
+    audio_codec = str(audio.get("codec_name") or "").lower() if audio else ""
+    return (
+        video_codec == "h264"
+        and pixel_format in {"yuv420p", "yuvj420p"}
+        and (not audio or audio_codec in {"aac", "mp3"})
+    )
+
+
+def _browser_preview_path(project_id: str) -> Path:
+    source = _resolve_source_video(project_id)
+    if _probe_browser_compatibility(source):
+        return source
+
+    project_dir = (storage.project_root / str(project_id)).resolve()
+    state = storage.load_project(project_id)
+    fingerprint = str(state.get("input_fingerprint") or "source").strip()[:64]
+    cache_dir = project_dir / "preview" / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cached = cache_dir / f"{fingerprint}_browser_1080p_crf{_PREVIEW_CRF}.mp4"
+    if cached.exists() and cached.is_file() and cached.stat().st_size > 0:
+        return cached
+
+    ffmpeg = Path(ffmpeg_binary_path())
+    if not ffmpeg.is_file():
+        raise RuntimeError(f"FFmpeg is not available: {ffmpeg}")
+    temporary = cached.with_suffix(".part.mp4")
+    with _PREVIEW_CACHE_LOCK:
+        if cached.exists() and cached.is_file() and cached.stat().st_size > 0:
+            return cached
+        temporary.unlink(missing_ok=True)
+        result = subprocess.run(
+            [
+                str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y",
+                "-i", str(source),
+                "-map", "0:v:0", "-map", "0:a:0?",
+                "-vf", (
+                    f"scale={_PREVIEW_MAX_WIDTH}:{_PREVIEW_MAX_HEIGHT}:"
+                    "force_original_aspect_ratio=decrease:force_divisible_by=2"
+                ),
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", str(_PREVIEW_CRF),
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                "-movflags", "+faststart", str(temporary),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=int(os.getenv("CAPCAP_PREVIEW_TRANSCODE_TIMEOUT", "1800")),
+        )
+        if result.returncode != 0 or not temporary.exists() or temporary.stat().st_size <= 0:
+            temporary.unlink(missing_ok=True)
+            detail = (result.stderr or result.stdout or "FFmpeg preview transcode failed").strip()
+            raise RuntimeError(f"Preview transcode failed: {detail[-4000:]}")
+        temporary.replace(cached)
+    return cached
+
+
+@app.get("/api/projects/{project_id}/preview")
+def preview_video(project_id: str, _: None = Depends(_auth)) -> FileResponse:
+    try:
+        path = _browser_preview_path(project_id)
+    except HTTPException:
+        raise
+    except (FileNotFoundError, PermissionError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(f"[Preview][ERROR] {exc}", flush=True)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return FileResponse(path, media_type="video/mp4", filename=path.name)
 
 
 @app.post("/api/projects/{project_id}/cleanup")

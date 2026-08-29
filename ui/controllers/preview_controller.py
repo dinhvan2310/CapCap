@@ -10,7 +10,7 @@ from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
-from runtime_paths import bin_path
+from runtime_paths import ffprobe_binary_path
 from worker_adapters import ExactFramePreviewWorker, FinalExportWorker, PreviewMuxWorker, QuickPreviewWorker
 
 
@@ -359,12 +359,7 @@ class PreviewController:
         return f"{value:.1f} {units[unit_idx]}"
 
     def _probe_source_fps(self, video_path: str) -> str:
-        ffprobe_candidates = [
-            bin_path("ffmpeg", "ffprobe.exe"),
-            bin_path("ffprobe.exe"),
-            shutil.which("ffprobe"),
-            shutil.which("ffprobe.exe"),
-        ]
+        ffprobe_candidates = [ffprobe_binary_path(), shutil.which("ffprobe"), shutil.which("ffprobe.exe")]
         ffprobe_path = ""
         for candidate in ffprobe_candidates:
             if candidate and os.path.isfile(candidate):
@@ -413,10 +408,7 @@ class PreviewController:
 
     def _video_has_audio_stream(self, video_path: str) -> bool:
         """Determine whether the source audio that subtitle-only export maps exists."""
-        ffprobe_candidates = [
-            bin_path("ffmpeg", "ffprobe.exe"), bin_path("ffprobe.exe"),
-            shutil.which("ffprobe"), shutil.which("ffprobe.exe"),
-        ]
+        ffprobe_candidates = [ffprobe_binary_path(), shutil.which("ffprobe"), shutil.which("ffprobe.exe")]
         ffprobe_path = next((path for path in ffprobe_candidates if path and os.path.isfile(path)), "")
         if not ffprobe_path:
             # A selected/extracted source is a safer fallback than presenting

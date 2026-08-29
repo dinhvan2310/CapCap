@@ -2,15 +2,15 @@ import os
 import subprocess
 import wave
 
-from runtime_paths import bin_path, subprocess_text_kwargs
+from runtime_paths import ffmpeg_binary_path, ffprobe_binary_path, subprocess_text_kwargs
 
 
 def _ffmpeg_path():
-    return bin_path("ffmpeg", "ffmpeg.exe")
+    return ffmpeg_binary_path()
 
 
 def _ffprobe_path():
-    return bin_path("ffmpeg", "ffprobe.exe")
+    return ffprobe_binary_path()
 
 
 def _subprocess_run_kwargs() -> dict:

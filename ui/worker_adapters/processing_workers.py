@@ -13,7 +13,7 @@ APP_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "app")
 if APP_PATH not in sys.path:
     sys.path.insert(0, APP_PATH)
 
-from runtime_paths import bin_path, subprocess_hidden_kwargs
+from runtime_paths import bin_path, ffmpeg_binary_path, ffprobe_binary_path, subprocess_hidden_kwargs
 from services import EngineRuntime, ResourceDownloadService
 
 
@@ -124,7 +124,7 @@ class AlternateRangeTranscriptionWorker(QThread):
             else:
                 import tempfile
                 temp_audio = os.path.join(tempfile.gettempdir(), f"capcap_range_{int(self.start_time * 1000)}_{int(self.end_time * 1000)}.wav")
-                ffmpeg = bin_path("ffmpeg", "ffmpeg.exe")
+                ffmpeg = ffmpeg_binary_path()
                 subprocess.run([
                     ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", str(self.start_time),
                     "-t", str(max(0.1, self.end_time - self.start_time)), "-i", self.video_path,
@@ -314,9 +314,9 @@ class RuntimeAssetsWorker(QThread):
             details = []
 
             self.progress.emit(5, "Checking bundled runtime assets...")
-            ffmpeg_path = Path(bin_path("ffmpeg", "ffmpeg.exe"))
+            ffmpeg_path = Path(ffmpeg_binary_path())
             if not ffmpeg_path.exists():
-                raise FileNotFoundError(f"Bundled FFmpeg is missing: {ffmpeg_path}")
+                raise FileNotFoundError(f"FFmpeg is not available: {ffmpeg_path}")
             details.append(f"FFmpeg ready: {ffmpeg_path}")
             self.progress.emit(12, "FFmpeg is ready.")
 
@@ -401,7 +401,7 @@ class TimelineWaveformWorker(QThread):
                 temp_audio = self.temp_audio_path
                 if temp_audio and not os.path.exists(temp_audio):
                     os.makedirs(os.path.dirname(temp_audio), exist_ok=True)
-                    ffmpeg = os.path.join(bin_path("ffmpeg"), "ffmpeg.exe")
+                    ffmpeg = ffmpeg_binary_path()
                     subprocess.run(
                         [
                             ffmpeg,
@@ -493,12 +493,7 @@ class TimelineThumbnailWorker(QThread):
                 self.finished.emit(self.request_signature, [], "")
                 return
 
-            ffmpeg_candidates = [
-                bin_path("ffmpeg", "ffmpeg.exe"),
-                bin_path("ffmpeg.exe"),
-                shutil.which("ffmpeg"),
-                shutil.which("ffmpeg.exe"),
-            ]
+            ffmpeg_candidates = [ffmpeg_binary_path(), shutil.which("ffmpeg"), shutil.which("ffmpeg.exe")]
             ffmpeg_path = ""
             for candidate in ffmpeg_candidates:
                 if candidate and os.path.isfile(candidate):
@@ -1034,7 +1029,7 @@ class VoiceSamplePreviewWorker(QThread):
             return candidate
         try:
             normalized_path = os.path.join(temp_dir, f"{Path(candidate).stem}_normalized.wav")
-            ffmpeg_path = Path(bin_path("ffmpeg", "ffmpeg.exe"))
+            ffmpeg_path = Path(ffmpeg_binary_path())
             if ffmpeg_path.exists():
                 cmd = [
                     str(ffmpeg_path),
@@ -1068,7 +1063,7 @@ class VoiceSamplePreviewWorker(QThread):
             return False
         if os.path.getsize(candidate) <= 44:
             return False
-        ffprobe_path = Path(bin_path("ffmpeg", "ffprobe.exe"))
+        ffprobe_path = Path(ffprobe_binary_path())
         if not ffprobe_path.exists():
             return True
         try:

@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from runtime_paths import asset_path, subprocess_hidden_kwargs, workspace_root
+from runtime_paths import asset_path, ffmpeg_binary_path, ffprobe_binary_path, subprocess_hidden_kwargs, workspace_root
 
 
 
@@ -94,14 +94,13 @@ def _extract_thumbnail(video_path: str, output_path: str) -> str:
 
 
 def _ffmpeg_path():
-    from runtime_paths import bin_path
-    return os.path.join(bin_path(), "ffmpeg", "ffmpeg.exe")
+    return ffmpeg_binary_path()
 
 
 def _get_video_duration(video_path: str) -> float:
     try:
         import subprocess
-        ffprobe = _ffmpeg_path().replace("ffmpeg.exe", "ffprobe.exe")
+        ffprobe = ffprobe_binary_path()
         result = subprocess.run(
             [ffprobe, "-v", "error", "-show_entries", "format=duration",
              "-of", "csv=p=0", video_path],

@@ -8,7 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
-from runtime_paths import asset_path, bin_path, subprocess_hidden_kwargs, temp_path
+from runtime_paths import asset_path, bin_path, ffprobe_binary_path, subprocess_hidden_kwargs, temp_path
 from video_processor import srt_to_ass
 try:
     # The normal launcher places ``app`` directly on sys.path.
@@ -216,7 +216,7 @@ def _realtime_color_graph(state=None) -> str:
 def _ffprobe_video_duration(video_path: str) -> float:
     """Get video duration using ffprobe as fallback."""
     try:
-        ffprobe = os.path.join(bin_path("ffmpeg"), "ffprobe.exe")
+        ffprobe = ffprobe_binary_path()
         if not os.path.exists(ffprobe):
             return 0.0
         result = subprocess.run(

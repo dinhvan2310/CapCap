@@ -5,7 +5,7 @@ import re
 import subprocess
 import time
 
-from runtime_paths import bin_path, ffmpeg_binary_path, models_path, subprocess_hidden_kwargs, subprocess_text_kwargs
+from runtime_paths import ffmpeg_binary_path, models_path, subprocess_hidden_kwargs, subprocess_text_kwargs
 from runtime_profile import is_remote_profile
 from services import ChunkingService, EngineRuntime, ProjectService, SegmentRegroupService, SegmentService
 from services.resource_download_service import ResourceDownloadService
@@ -67,7 +67,7 @@ class PrepareWorkflow:
                 print("[ASR Audio] Reusing level analysis: normalization not needed.")
                 return source
 
-        ffmpeg = str(bin_path("ffmpeg", "ffmpeg.exe"))
+        ffmpeg = str(ffmpeg_binary_path())
         if not os.path.exists(ffmpeg):
             print("[ASR Audio] FFmpeg unavailable; skipping level normalization.")
             return source
@@ -559,7 +559,7 @@ class PrepareWorkflow:
                 )
                 try:
                     ffmpeg_cmd = [
-                        str(bin_path("ffmpeg", "ffmpeg.exe")),
+                        str(ffmpeg_binary_path()),
                         "-i", vocal_path,
                         "-af", "afftdn,loudnorm=I=-16:LRA=11:TP=-1.5",
                         "-ar", "16000",
