@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 from importlib import import_module
-from runtime_profile import is_remote_profile
-
-
 class EngineRuntime:
     _ADAPTERS = {
         "ffmpeg": ("engines.ffmpeg_adapter", "FFmpegAdapter"),
@@ -20,19 +17,12 @@ class EngineRuntime:
 
     def __init__(self):
         self._instances = {}
-        self._remote_profile = is_remote_profile()
 
     def _adapter(self, key: str):
         instance = self._instances.get(key)
         if instance is not None:
             return instance
         module_name, class_name = self._ADAPTERS[key]
-        if self._remote_profile and key == "whisper":
-            module_name, class_name = ("engines.remote_whisper_adapter", "RemoteWhisperAdapter")
-        elif self._remote_profile and key == "translator":
-            module_name, class_name = ("engines.remote_translator_adapter", "RemoteTranslatorAdapter")
-        elif self._remote_profile and key == "tts":
-            module_name, class_name = ("engines.remote_tts_adapter", "RemoteTTSAdapter")
         module = import_module(module_name)
         instance = getattr(module, class_name)()
         self._instances[key] = instance

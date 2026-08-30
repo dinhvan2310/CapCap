@@ -100,8 +100,6 @@ a = Analysis(
         "PySide6.QtSvg",
         "PySide6.QtSvgWidgets",
         "mpv",
-        "remote_api",
-        "remote_api_server",
         "services",
         "services.project_service",
         "services.gui_project_bridge",

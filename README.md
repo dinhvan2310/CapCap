@@ -15,7 +15,7 @@ We're continuously improving CapCap.
 
 - Guided workflow: **Prepare → Transcript → Translate → TTS → Export**
 - Audio transcription with Faster-Whisper or SenseVoice, plus OCR subtitle extraction
-- Cloud/API translation providers with Google Translate fallback
+- Google Translate web fallback and optional local processing
 - Piper and Edge TTS, optional speaker diarization, and per-speaker voice assignment
 - Editor timeline with subtitles, blur, logo, mask, text, selection ranges, locks, and Fast Preview
 
@@ -37,7 +37,7 @@ pip install -r requirements-local.txt
 python ui/gui.py
 ```
 
-Copy `.env_example` to `.env` only if you need manual provider or remote-server configuration. Most settings are available in the app.
+Copy `.env_example` to `.env` only if you need manual provider configuration. Most settings are available in the app.
 
 ## Support CapCap
 

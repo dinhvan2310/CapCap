@@ -595,9 +595,6 @@ class PrepareWorkflowWorker(QThread):
         skip_translation=False,
         prefetch_voice_name="",
         prefetch_voice_speed=1.0,
-        remote_api_url="",
-        remote_api_token="",
-        force_remote_api=False,
     ):
         super().__init__()
         self.workspace_root = workspace_root
@@ -616,56 +613,10 @@ class PrepareWorkflowWorker(QThread):
         self.skip_translation = skip_translation
         self.prefetch_voice_name = prefetch_voice_name
         self.prefetch_voice_speed = float(prefetch_voice_speed or 1.0)
-        self.remote_api_url = str(remote_api_url or "").strip()
-        self.remote_api_token = str(remote_api_token or "").strip()
-        self.force_remote_api = bool(force_remote_api)
 
     def run(self):
         try:
-            from runtime_profile import is_remote_profile
-            if self.force_remote_api or is_remote_profile():
-                from remote_api import remote_api_post
-                old_url = os.environ.get("CAPCAP_REMOTE_API_URL")
-                old_token = os.environ.get("CAPCAP_REMOTE_API_TOKEN")
-                try:
-                    if self.remote_api_url:
-                        os.environ["CAPCAP_REMOTE_API_URL"] = self.remote_api_url
-                    if self.remote_api_token:
-                        os.environ["CAPCAP_REMOTE_API_TOKEN"] = self.remote_api_token
-                    response = remote_api_post(
-                        "/v1/prepare",
-                        {
-                            "workspace_root": self.workspace_root,
-                            "video_path": self.video_path,
-                            "source_language": self.source_language,
-                            "target_language": self.target_language,
-                            "mode": self.mode,
-                            "audio_handling_mode": self.audio_handling_mode,
-                            "translator_ai": self.translator_ai,
-                            "optimize_subtitles": self.optimize_subtitles,
-                            "translator_style": self.translator_style,
-                            "whisper_model_name": self.whisper_model_name,
-                            "transcription_engine": self.transcription_engine,
-                            "speaker_diarization": self.speaker_diarization,
-                            "speaker_diarization_num_speakers": self.speaker_diarization_num_speakers,
-                            "skip_translation": self.skip_translation,
-                            "prefetch_voice_name": self.prefetch_voice_name,
-                            "prefetch_voice_speed": self.prefetch_voice_speed,
-                        },
-                        timeout=3600,
-                        retries=1 if self.force_remote_api else 3,
-                    )
-                    self.finished.emit(str(response.get("project_state_path", "")), "")
-                finally:
-                    if old_url is None:
-                        os.environ.pop("CAPCAP_REMOTE_API_URL", None)
-                    else:
-                        os.environ["CAPCAP_REMOTE_API_URL"] = old_url
-                    if old_token is None:
-                        os.environ.pop("CAPCAP_REMOTE_API_TOKEN", None)
-                    else:
-                        os.environ["CAPCAP_REMOTE_API_TOKEN"] = old_token
-            else:
+            if True:
                 from workflows.prepare_workflow import PrepareWorkflow
                 workflow = PrepareWorkflow(self.workspace_root)
                 project_state = workflow.run(
