@@ -332,6 +332,14 @@ class QtMediaPlayerBackend(QObject):
     def clear_blur_region(self):
         return None
 
+    def set_mask_region(self, mask_region=None):
+        """Compatibility hook; mask filters require the MPV backend."""
+        return None
+
+    def clear_mask_region(self):
+        """Compatibility hook; mask filters require the MPV backend."""
+        return None
+
     def set_color_filter_state(self, state=None):
         return None
 

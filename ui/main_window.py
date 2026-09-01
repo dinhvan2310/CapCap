@@ -7,6 +7,7 @@ import glob
 import hashlib
 import shutil
 import threading
+import time
 from uuid import uuid4
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
@@ -156,6 +157,12 @@ class _BootstrapMediaBackend:
         return None
 
     def clear_blur_region(self):
+        return None
+
+    def set_mask_region(self, mask_region=None):
+        return None
+
+    def clear_mask_region(self):
         return None
 
     def set_volume(self, percent):

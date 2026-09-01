@@ -28,9 +28,57 @@ class SubtitleOverlayItem(QGraphicsItem):
         self.custom_position_enabled = False
         self.custom_x_percent = 50
         self.custom_y_percent = 86
+        self.bold = True
+        self.shadow_color = QColor(0, 0, 0, 180)
+        self.shadow_depth = 0.0
+        self.highlight_color = QColor("#FFD400")
+        self.highlight_phrases: list[str] = []
+        self.karaoke_word_index = -1
+        self.auto_keyword_highlight = False
+        self.animation_style = "static"
+        self.animation_progress = 1.0
+        self._editable = False
         # The libmpv overlay exposes this same switch.  Keep the Qt fallback
         # API-compatible so a machine that cannot load libmpv still starts.
         self._text_rendering_enabled = True
+
+    def set_editable(self, editable: bool):
+        """Match the MPV subtitle overlay's selection/editing interface."""
+        self._editable = bool(editable)
+        self.setFlag(QGraphicsItem.ItemIsMovable, self._editable)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, self._editable)
+        self.setCursor(Qt.OpenHandCursor if self._editable else Qt.ArrowCursor)
+
+    def set_suppressed(self, suppressed: bool):
+        """Compatibility hook for MPV's top-level overlay suppression.
+
+        This item lives inside the preview scene, so modal dialogs already
+        cover it normally and no explicit suppression is necessary.
+        """
+        return None
+
+    def set_effects(
+        self,
+        *,
+        highlight_color=None,
+        highlight_phrases=None,
+        karaoke_word_index=-1,
+        auto_keyword_highlight=False,
+        animation_style="Static",
+        animation_progress=1.0,
+    ):
+        """Accept the shared live-subtitle effect state on the Qt fallback."""
+        self.highlight_color = QColor(highlight_color or "#FFD400")
+        self.highlight_phrases = [
+            str(value).strip()
+            for value in (highlight_phrases or [])
+            if str(value).strip()
+        ]
+        self.karaoke_word_index = int(karaoke_word_index)
+        self.auto_keyword_highlight = bool(auto_keyword_highlight)
+        self.animation_style = str(animation_style or "Static").strip().lower()
+        self.animation_progress = max(0.0, min(1.0, float(animation_progress)))
+        self.update()
 
     def set_text_rendering(self, enabled: bool):
         """Enable/disable Qt text painting while retaining the drag item.
@@ -85,6 +133,9 @@ class SubtitleOverlayItem(QGraphicsItem):
         background_box=None,
         background_color=None,
         single_line=None,
+        bold=None,
+        shadow_color=None,
+        shadow_depth=None,
     ):
         changed = False
         if font_name and font_name != self.font_name:
@@ -113,6 +164,19 @@ class SubtitleOverlayItem(QGraphicsItem):
         if single_line is not None and bool(single_line) != self.single_line:
             self.single_line = bool(single_line)
             changed = True
+        if bold is not None and bool(bold) != self.bold:
+            self.bold = bool(bold)
+            changed = True
+        if shadow_color is not None:
+            next_shadow_color = QColor(shadow_color)
+            if next_shadow_color != self.shadow_color:
+                self.shadow_color = next_shadow_color
+                changed = True
+        if shadow_depth is not None:
+            next_shadow_depth = max(0.0, float(shadow_depth))
+            if next_shadow_depth != self.shadow_depth:
+                self.shadow_depth = next_shadow_depth
+                changed = True
         if changed:
             self.update()
 
@@ -156,7 +220,7 @@ class SubtitleOverlayItem(QGraphicsItem):
         painter.setPen(self.font_color)
         font = QFont(self.font_name)
         font.setPixelSize(max(1, int(self.font_size)))
-        font.setBold(True)
+        font.setBold(self.bold)
         painter.setFont(font)
         line_height = max(24, int(self.font_size * self.LINE_HEIGHT_FACTOR))
         single_line_flags = Qt.AlignCenter
