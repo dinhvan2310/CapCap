@@ -9,7 +9,7 @@ faster-whisper
 # allows older 4.x releases, which may not support the bundled CUDA pack.
 ctranslate2>=4.6.3,<5
 vietnormalizer
-piper-tts
+piper-tts>=1.7.0
 onnxruntime-gpu
 scipy
 openai
