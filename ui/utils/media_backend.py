@@ -250,7 +250,18 @@ class QtMediaPlayerBackend(QObject):
             self._player.setVideoOutput(video_view.video_item)
         self._player.positionChanged.connect(self.positionChanged.emit)
         self._player.durationChanged.connect(self.durationChanged.emit)
-        self._player.stateChanged.connect(lambda s: self.stateChanged.emit(int(s.value)))
+        # Qt 6 renamed QMediaPlayer.stateChanged to playbackStateChanged.
+        # Keep the fallback for older bindings used by some packaged builds.
+        player_state_changed = getattr(
+            self._player, "playbackStateChanged", None
+        ) or getattr(self._player, "stateChanged", None)
+        if player_state_changed is None:
+            raise RuntimeError("QMediaPlayer has no playback-state signal")
+        player_state_changed.connect(
+            lambda state: self.stateChanged.emit(
+                int(getattr(state, "value", state))
+            )
+        )
         # When the clip reaches the end, the QMediaPlayer goes to
         # StoppedState — surface this so the timeline can stop too
         # (Bug 2: video not pausing at end, timeline keeps running).
