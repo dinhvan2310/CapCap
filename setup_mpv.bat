@@ -39,7 +39,8 @@ echo [CapCap] MPV runtime is ready.
 
 rem python-mpv is required only when running CapCap from source.
 set "CAPCAP_PYTHON=python"
-if exist ".venv\Scripts\python.exe" set "CAPCAP_PYTHON=.venv\Scripts\python.exe"
+if exist "venv\Scripts\python.exe" set "CAPCAP_PYTHON=venv\Scripts\python.exe"
+if exist ".venv\Scripts\python.exe" if "%CAPCAP_PYTHON%"=="python" set "CAPCAP_PYTHON=.venv\Scripts\python.exe"
 %CAPCAP_PYTHON% -c "import mpv" >nul 2>&1
 if errorlevel 1 (
     echo [CapCap] python-mpv is not installed; installing it now...
