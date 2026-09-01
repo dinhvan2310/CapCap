@@ -34,7 +34,11 @@ models/**
 .DS_Store
 Thumbs.db
 
-bin/
+# Runtime binaries are ignored by default, but the MPV runtime is shipped
+# with the repository so every clone has the advanced preview backend.
+bin/*
+!bin/mpv/
+!bin/mpv/**
 dist/
 !frontend/dist/
 !frontend/dist/**
