@@ -4429,6 +4429,29 @@ class VideoTranslatorGUI(QMainWindow):
     def load_project_context(self, state):
         if not state:
             return
+        # A process crash can leave persisted workflow steps at "running".
+        # There is no worker behind those statuses after the project is
+        # reopened, so recover them before they can keep the UI locked.
+        live_worker = False
+        for worker_name in ("voice_thread", "extraction_thread", "vocal_thread"):
+            worker = getattr(self, worker_name, None)
+            try:
+                live_worker = live_worker or bool(worker is not None and worker.isRunning())
+            except Exception:
+                pass
+        if not live_worker and not bool(getattr(self, "_pipeline_active", False)):
+            interrupted_steps = [
+                name for name, status in dict(getattr(state, "steps", {}) or {}).items()
+                if str(status or "").strip().lower() == "running"
+            ]
+            if interrupted_steps:
+                for step_name in interrupted_steps:
+                    state.set_step_status(step_name, "failed")
+                self.project_service.save_project(state)
+                self.log(
+                    "[Project] Recovered interrupted workflow step(s): "
+                    + ", ".join(interrupted_steps)
+                )
         self._allow_post_pipeline_preview_assets = False
         # Subtitle Source is stored only with this project.  Old projects
         # without a value start from the normal default instead of inheriting
@@ -13018,8 +13041,16 @@ class VideoTranslatorGUI(QMainWindow):
         has_voice_audio = bool(selected_audio_path and os.path.exists(selected_audio_path))
         has_subtitle_track = bool(self.last_translated_srt_path and os.path.exists(self.last_translated_srt_path))
         mode = self.get_output_mode_key()
-        steps = getattr(getattr(self, "current_project_state", None), "steps", {}) or {}
-        voice_running = steps.get("generate_tts") == "running" or steps.get("mix_audio") == "running"
+        # Persisted step state is historical and may say "running" after a
+        # crash. Only a live worker in this process should lock editing.
+        voice_worker = getattr(self, "voice_thread", None)
+        try:
+            voice_running = bool(
+                getattr(self, "_voiceover_starting", False)
+                or (voice_worker is not None and voice_worker.isRunning())
+            )
+        except Exception:
+            voice_running = bool(getattr(self, "_voiceover_starting", False))
         # Translation is sufficient for a final subtitle-only export.  TTS
         # remains optional: if it has not been generated, Export and Fast
         # Preview retain the source audio and burn the translated subtitles.
@@ -13111,10 +13142,17 @@ class VideoTranslatorGUI(QMainWindow):
             # Mode is active or a voice/render worker is running.
             source_video = self._resolve_preview_original_video_path()
             self.add_music_layer_btn.setEnabled(bool(source_video) and not review_mode and not voice_running)
-        # Overlay tracks are only meaningful once the generated output is
-        # ready. Keep their controls disabled before that point so users
-        # cannot create layers against an incomplete video workflow.
-        self._optional_layer_controls_ready = bool(can_export and not voice_running and not review_mode)
+        # Visual overlays are authored against the source video and do not
+        # depend on translation, TTS, or an export artifact. Unlock them as
+        # soon as a video is loaded, except while playback/render work owns
+        # the preview.
+        self._optional_layer_controls_ready = bool(
+            v_ok
+            and not voice_running
+            and not review_mode
+            and not bool(getattr(self, "_pipeline_active", False))
+            and not bool(getattr(self, "_styled_preview_running", False))
+        )
         for button_name in ("blur_add_btn", "add_logo_btn", "add_mask_btn", "add_text_btn"):
             button = getattr(self, button_name, None)
             if button is not None:
@@ -14476,6 +14514,7 @@ class VideoTranslatorGUI(QMainWindow):
             self.voiceover_btn.setEnabled(False)
             self.voiceover_btn.setText("Generating... (TTS)")
         self.progress_bar.setValue(85)
+        self._voiceover_starting = True
         self.update_project_step("generate_tts", "running")
         if bg_path:
             self.update_project_step("mix_audio", "running")
@@ -14507,6 +14546,7 @@ class VideoTranslatorGUI(QMainWindow):
         self.voice_thread.progress.connect(self.log)
         self.voice_thread.finished.connect(self.on_voiceover_finished)
         self.voice_thread.start()
+        self._voiceover_starting = False
 
     def _apply_generated_tts_texts(self, voice_segments):
         source_segments = self.current_translated_segments
@@ -14620,6 +14660,7 @@ class VideoTranslatorGUI(QMainWindow):
         self.persist_translation_project_data(self.current_translated_segments, out_path)
 
     def on_voiceover_finished(self, voice_track, mixed, voice_segments, error):
+        self._voiceover_starting = False
         if hasattr(self, "voiceover_btn"):
             self.voiceover_btn.setEnabled(True)
             self.voiceover_btn.setText("Generate Voice / Mix")
