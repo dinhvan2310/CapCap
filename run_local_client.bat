@@ -17,6 +17,7 @@ if not exist "%VENV_PYTHON%" (
 rem Old piper-phonemize Windows wheels contain a build-machine path such as
 rem D:/a/piper1-gpl/... and fail to locate phontab on another PC.  Verify the
 rem actual bundled data file, not merely whether `import piper` succeeds.
+"%VENV_PYTHON%" -m pip uninstall -y piper-phonemize >nul 2>&1
 "%VENV_PYTHON%" -c "import pathlib,piper; p=pathlib.Path(piper.__file__).resolve().parent/'espeak-ng-data'/'phontab'; raise SystemExit(0 if p.is_file() else 1)" >nul 2>&1
 if errorlevel 1 (
     echo [CapCap] Repairing legacy Piper TTS runtime...
