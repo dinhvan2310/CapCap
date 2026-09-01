@@ -48,14 +48,17 @@ if errorlevel 1 (
     if errorlevel 1 echo [WARN] Could not install python-mpv. The packaged app does not need this step.
 )
 
-rem Piper 1.2 used an obsolete build-time espeak-ng path on Windows.
-rem Piper 1.7+ bundles espeak-ng-data and works from any checkout path.
-%CAPCAP_PYTHON% -c "import piper; print(getattr(piper, '__version__', 'installed'))" >nul 2>&1
+rem Verify the real eSpeak data file. `import piper` alone can succeed with a
+rem legacy wheel whose native module still points at its build machine.
+%CAPCAP_PYTHON% -c "import pathlib,piper; p=pathlib.Path(piper.__file__).resolve().parent/'espeak-ng-data'/'phontab'; raise SystemExit(0 if p.is_file() else 1)" >nul 2>&1
 if errorlevel 1 (
-    echo [CapCap] Installing Piper TTS...
-    %CAPCAP_PYTHON% -m pip install "piper-tts>=1.7.0"
-) else (
-    %CAPCAP_PYTHON% -m pip install --upgrade "piper-tts>=1.7.0"
+    echo [CapCap] Repairing legacy Piper TTS runtime...
+    %CAPCAP_PYTHON% -m pip uninstall -y piper-tts piper-phonemize >nul 2>&1
+    %CAPCAP_PYTHON% -m pip install --no-cache-dir "piper-tts>=1.7.0"
+    if errorlevel 1 (
+        echo [ERROR] Could not install a working Piper TTS runtime.
+        exit /b 1
+    )
 )
 
 echo.
